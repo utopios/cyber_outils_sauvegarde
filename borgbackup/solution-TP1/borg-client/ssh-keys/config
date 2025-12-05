@@ -1,0 +1,4 @@
+Host borg-server
+    StrictHostKeyChecking accept-new
+    UserKnownHostsFile /root/.ssh/known_hosts
+    User borg

@@ -70,7 +70,7 @@ services:
     restart: unless-stopped
     volumes:
       - borg_repo:/var/borg/repos
-      - ./borg-server/ssh-keys:/home/borg/.ssh:ro
+      - ./borg-server/ssh-keys:/home/borg/.ssh
     networks:
       - backup_network
     # ISOLATION: Le serveur de sauvegarde est sur un reseau separe
