@@ -1,0 +1,17 @@
+# Fichiers de secrets - NE JAMAIS VERSIONNER
+.env
+*.env.backup.*
+
+# Cles SSH
+borg-client/ssh-keys/id_rsa
+borg-client/ssh-keys/id_rsa.pub
+borg-server/ssh-keys/authorized_keys
+
+# Export de la cle Borg
+borg-key-backup.txt
+*.key
+
+# Fichiers temporaires
+*.log
+*.tmp
+.DS_Store
