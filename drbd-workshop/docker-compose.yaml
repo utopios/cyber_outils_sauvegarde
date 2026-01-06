@@ -1,0 +1,176 @@
+# =============================================================================
+# Docker Compose - Workshop DRBD Haute Disponibilite
+# =============================================================================
+# Architecture:
+#   - drbd-node1: Noeud principal (peut etre Primary)
+#   - drbd-node2: Noeud secondaire (peut etre Primary apres failover)
+#   - db-server: PostgreSQL pour les TPs avances (optionnel)
+#
+# Usage:
+#   docker-compose up -d
+#   docker exec -it drbd-node1 bash
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ===========================================================================
+  # NOEUD DRBD 1
+  # ===========================================================================
+  drbd-node1:
+    build:
+      context: ./node1
+      dockerfile: Dockerfile
+    container_name: drbd-node1
+    hostname: node1
+    restart: unless-stopped
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    environment:
+      - DRBD_NODE_NAME=node1
+      - DRBD_NODE_IP=172.28.0.11
+      - DRBD_PEER_IP=172.28.0.12
+      - DRBD_PORT=7788
+      - DRBD_RESOURCE=r0
+    volumes:
+      # Scripts partages
+      - ./scripts:/scripts:ro
+      # Donnees persistantes
+      - drbd_node1_data:/data
+      # Donnees DRBD montees
+      - drbd_shared_data1:/mnt/drbd
+    networks:
+      drbd_net:
+        ipv4_address: 172.28.0.11
+    ports:
+      - "7788:7788"
+    stdin_open: true
+    tty: true
+    healthcheck:
+      test: ["CMD", "ping", "-c", "1", "172.28.0.12"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # NOEUD DRBD 2
+  # ===========================================================================
+  drbd-node2:
+    build:
+      context: ./node2
+      dockerfile: Dockerfile
+    container_name: drbd-node2
+    hostname: node2
+    restart: unless-stopped
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    environment:
+      - DRBD_NODE_NAME=node2
+      - DRBD_NODE_IP=172.28.0.12
+      - DRBD_PEER_IP=172.28.0.11
+      - DRBD_PORT=7788
+      - DRBD_RESOURCE=r0
+    volumes:
+      # Scripts partages
+      - ./scripts:/scripts:ro
+      # Donnees persistantes
+      - drbd_node2_data:/data
+      # Donnees DRBD montees
+      - drbd_shared_data2:/mnt/drbd
+    networks:
+      drbd_net:
+        ipv4_address: 172.28.0.12
+    ports:
+      - "7789:7788"
+    stdin_open: true
+    tty: true
+    depends_on:
+      - drbd-node1
+    healthcheck:
+      test: ["CMD", "ping", "-c", "1", "172.28.0.11"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # SERVEUR DE BASE DE DONNEES (Pour TP Avance)
+  # ===========================================================================
+  db-server:
+    image: postgres:15-alpine
+    container_name: drbd-db-server
+    hostname: db-server
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=workshop
+      - POSTGRES_PASSWORD=workshop123
+      - POSTGRES_DB=testdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      drbd_net:
+        ipv4_address: 172.28.0.20
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workshop -d testdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # MONITORING (Optionnel)
+  # ===========================================================================
+  monitor:
+    image: alpine:latest
+    container_name: drbd-monitor
+    hostname: monitor
+    restart: unless-stopped
+    command: >
+      sh -c "
+        apk add --no-cache bash curl netcat-openbsd &&
+        echo 'Monitor ready - use for network testing' &&
+        tail -f /dev/null
+      "
+    networks:
+      drbd_net:
+        ipv4_address: 172.28.0.100
+    depends_on:
+      - drbd-node1
+      - drbd-node2
+
+# =============================================================================
+# RESEAUX
+# =============================================================================
+networks:
+  drbd_net:
+    driver: bridge
+    name: drbd_workshop_net
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+          gateway: 172.28.0.1
+
+# =============================================================================
+# VOLUMES PERSISTANTS
+# =============================================================================
+volumes:
+  # Donnees brutes pour DRBD
+  drbd_node1_data:
+    name: drbd_workshop_node1_data
+  drbd_node2_data:
+    name: drbd_workshop_node2_data
+
+  # Donnees montees via DRBD
+  drbd_shared_data1:
+    name: drbd_workshop_shared1
+  drbd_shared_data2:
+    name: drbd_workshop_shared2
+
+  # PostgreSQL
+  postgres_data:
+    name: drbd_workshop_postgres
