@@ -232,10 +232,7 @@ case "${1:-help}" in
         ;;
     http://*|https://*)
         # Custom URL avec nombre de requetes optionnel
-        local url="$1"
-        local requests="${2:-100}"
-        local concurrency="${3:-10}"
-        run_test "$requests" "$concurrency" "$url"
+        run_test "${2:-100}" "${3:-10}" "$1"
         ;;
     *)
         echo "Commande inconnue: $1"
