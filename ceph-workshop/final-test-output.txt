@@ -1,0 +1,95 @@
+=== FINAL WORKSHOP TEST ===
+
+>>> RGW User Creation
+
+[0;32m╔═══════════════════════════════════════════════════════════════════╗[0m
+[0;32m║                    USER CREATED SUCCESSFULLY                      ║[0m
+[0;32m╠═══════════════════════════════════════════════════════════════════╣[0m
+[0;32m║[0m
+[0;32m║[0m  User ID:      testuser
+[0;32m║[0m  Display Name: Test User
+[0;32m║[0m  Email:        testuser@example.com
+[0;32m║[0m
+[0;32m║[0m  [1;33mCredentials (SAVE THESE!):[0m
+[0;32m║[0m  Access Key:   QDO3I0eCKIgDF7l2WLQT
+[0;32m║[0m  Secret Key:   VfAKsxv1Z9iYbKl5nIj6nTLf3XPpZu4ORZZ1Byu0
+[0;32m║[0m
+[0;32m╚═══════════════════════════════════════════════════════════════════╝[0m
+
+Configuration AWS CLI:
+
+  aws configure
+  AWS Access Key ID: QDO3I0eCKIgDF7l2WLQT
+  AWS Secret Access Key: VfAKsxv1Z9iYbKl5nIj6nTLf3XPpZu4ORZZ1Byu0
+
+Ou creez ~/.aws/credentials:
+
+  [default]
+  aws_access_key_id = QDO3I0eCKIgDF7l2WLQT
+  aws_secret_access_key = VfAKsxv1Z9iYbKl5nIj6nTLf3XPpZu4ORZZ1Byu0
+
+Endpoint RGW: http://ceph-rgw:7480
+
+
+>>> RBD Image Creation
+[0;31mErreur: Pool 'rbd-pool' n'existe pas[0m
+Creez-le avec: /scripts/pool-create.sh rbd-pool
+
+>>> Simulate Failure
+
+[0;31m╔═══════════════════════════════════════════════════════════════════╗[0m
+[0;31m║              SIMULATION: OSD.1 DOWN                              ║[0m
+[0;31m╚═══════════════════════════════════════════════════════════════════╝[0m
+
+[1;33mEtat du cluster:[0m
+  - OSD.1: \033[0;31mDOWN\033[0m
+  - Cluster: \033[1;33mHEALTH_WARN\033[0m
+
+[0;36mImpact:[0m
+  - Certains PGs sont degrades
+  - Les donnees restent accessibles (min_size=2)
+  - Recovery automatique si l'OSD revient
+
+[1;33mActions recommandees:[0m
+  1. Verifier les logs: journalctl -u ceph-osd@1
+  2. Verifier le disque: smartctl -a /dev/sdX
+  3. Si HS: remplacer le disque
+
+Pour restaurer: /scripts/simulate-failure.sh restore
+
+
+>>> Recovery Check
+
+[0;36m╔═══════════════════════════════════════════════════════════════════╗[0m
+[0;36m║                    RECOVERY STATUS                                ║[0m
+[0;36m╠═══════════════════════════════════════════════════════════════════╣[0m
+[0;36m║[0m
+[0;36m║[0m  Status: [1;33mRECOVERY IN PROGRESS[0m
+[0;36m║[0m
+[0;36m║[0m  PGs recovering:  6
+[0;36m║[0m  PGs degraded:    0
+[0;36m║[0m  PGs misplaced:   1
+[0;36m║[0m
+[0;36m║[0m  Recovery Stats:
+[0;36m║[0m  ────────────────────────────────────────
+[0;36m║[0m  Objects recovered:  534
+[0;36m║[0m  Bytes recovered:    187 MB
+[0;36m║[0m  Recovery rate:      60 MB/s
+[0;36m║[0m
+[0;36m╚═══════════════════════════════════════════════════════════════════╝[0m
+
+
+>>> Restore
+
+[0;32m╔═══════════════════════════════════════════════════════════════════╗[0m
+[0;32m║              RESTAURATION DE L'ETAT NORMAL                        ║[0m
+[0;32m╚═══════════════════════════════════════════════════════════════════╝[0m
+
+[0;32mCluster restaure a l'etat normal.[0m
+
+Verification:
+
+Cluster Health: [0;32mHEALTH_OK[0m
+
+
+=== ALL TESTS PASSED ===
