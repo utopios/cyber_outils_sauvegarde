@@ -1,0 +1,43 @@
+---
+# Defaults pour le rôle de sauvegarde
+
+# Configuration pgBackRest
+pgbackrest_stanza: "finsecure"
+pgbackrest_repo_path: "/var/lib/pgbackrest"
+pgbackrest_log_path: "/var/log/pgbackrest"
+pgbackrest_spool_path: "/var/spool/pgbackrest"
+
+# Rétention des sauvegardes
+backup_retention_full: 2
+backup_retention_diff: 7
+backup_retention_archive: 14
+
+# Configuration de compression
+backup_compress_type: "lz4"
+backup_compress_level: 6
+
+# Parallélisme
+backup_process_max: 4
+
+# Planification (cron)
+backup_schedule_full: "0 2 * * 0"     # Dimanche à 2h
+backup_schedule_diff: "0 2 * * 1-6"   # Lun-Sam à 2h
+backup_schedule_archive: "*/5 * * * *" # Toutes les 5 minutes
+
+# Vérification des sauvegardes
+backup_verify_enabled: true
+backup_verify_process_max: 2
+
+# Notifications
+backup_notify_on_success: false
+backup_notify_on_failure: true
+backup_notification_channel: "slack"
+
+# Timeout en secondes
+backup_timeout_full: 3600
+backup_timeout_diff: 1800
+
+# Transfert vers site de secours
+backup_ship_to_standby: true
+backup_standby_host: "{{ hostvars[groups['dc_lyon'][0]]['ansible_host'] | default('192.168.56.20') }}"
+backup_standby_user: "postgres"

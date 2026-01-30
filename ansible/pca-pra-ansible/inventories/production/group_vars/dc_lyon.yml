@@ -1,0 +1,118 @@
+---
+# Variables spécifiques au datacenter Lyon (Secours)
+
+# ============================================
+# IDENTIFICATION DC
+# ============================================
+dc_name: "DC-LYON"
+dc_code: "LYO"
+dc_type: standby
+dc_priority: 2
+
+# ============================================
+# RÉSEAU
+# ============================================
+dc_network_config:
+  subnet: "10.2.0.0/16"
+  gateway: "10.2.0.1"
+  dns_servers:
+    - "10.2.0.10"
+    - "10.2.0.11"
+  ntp_servers:
+    - "ntp1.finsecure.local"
+    - "ntp2.finsecure.local"
+
+# Docker networks
+docker_networks:
+  - name: dc_lyon_net
+    driver: bridge
+    ipam:
+      subnet: "172.21.0.0/16"
+      gateway: "172.21.0.1"
+
+# ============================================
+# POSTGRESQL - STANDBY
+# ============================================
+pg_role: standby
+pg_hot_standby: "on"
+pg_primary_conninfo: "host=192.168.56.10 port=5432 user=replicator password={{ postgresql.replication_password }}"
+
+# Configuration de réplication
+pg_replication_config:
+  slot_name: "lyon_replica"
+  application_name: "lyon_standby"
+  primary_host: "192.168.56.10"
+  primary_port: 5432
+  trigger_file: "/tmp/postgresql.trigger"
+
+# Paramètres pour promotion
+pg_promotion:
+  recovery_target_timeline: "latest"
+  promote_trigger_file: "/tmp/promote.trigger"
+
+# ============================================
+# REDIS - REPLICA
+# ============================================
+redis_role: replica
+redis_bind: "0.0.0.0"
+
+redis_replication_config:
+  master_host: "192.168.56.10"
+  master_port: 6379
+  master_auth: "{{ redis.password }}"
+
+# ============================================
+# HAPROXY - STANDBY
+# ============================================
+haproxy_role: standby
+haproxy_state: standby
+
+# Configuration prête pour activation
+haproxy_backends:
+  api:
+    balance: roundrobin
+    servers:
+      - name: app-lyon-01
+        address: "app-lyon-01:8080"
+        weight: 100
+      - name: app-lyon-02
+        address: "app-lyon-02:8080"
+        weight: 100
+
+# ============================================
+# APPLICATIONS (en standby)
+# ============================================
+app_instances:
+  - name: app-lyon-01
+    container_port: 8080
+    host_port: 8081
+    env:
+      SPRING_PROFILES_ACTIVE: "production,lyon,standby"
+      DB_HOST: "postgres-standby"
+      REDIS_HOST: "redis-lyon"
+    state: stopped  # Démarré uniquement lors du failover
+  - name: app-lyon-02
+    container_port: 8080
+    host_port: 8082
+    env:
+      SPRING_PROFILES_ACTIVE: "production,lyon,standby"
+      DB_HOST: "postgres-standby"
+      REDIS_HOST: "redis-lyon"
+    state: stopped
+
+# ============================================
+# BACKUP CONFIGURATION
+# ============================================
+backup_config:
+  is_primary: false
+  receives_backups: true
+  backup_reception_dir: /var/lib/pgbackrest
+
+# pgBackRest specifique Lyon
+pgbackrest_repo:
+  repo1_path: /var/lib/pgbackrest
+  repo1_retention_full: 4
+  repo1_retention_diff: 14
+  # Reçoit depuis Paris
+  archive_push: false
+  archive_get: true

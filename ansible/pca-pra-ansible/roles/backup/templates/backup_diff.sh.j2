@@ -1,0 +1,64 @@
+#!/bin/bash
+# Script de sauvegarde différentielle PostgreSQL
+# Généré par Ansible pour FinSecure PCA/PRA
+# Datacenter: {{ dc_name | default('N/A') }}
+
+set -euo pipefail
+
+# Configuration
+STANZA="{{ pgbackrest_stanza }}"
+PG_CONTAINER="{{ pg_container }}"
+LOG_FILE="{{ pgbackrest_log_path }}/diff_backup_$(date +%Y%m%d_%H%M%S).log"
+SLACK_WEBHOOK="{{ notifications.slack.webhook_url | default('') }}"
+
+# Fonctions
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+notify_failure() {
+    if [[ "{{ backup_notify_on_failure | string | lower }}" == "true" ]] && [[ -n "$SLACK_WEBHOOK" ]]; then
+        curl -s -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\":x: ÉCHEC Sauvegarde DIFF sur {{ inventory_hostname }}\nErreur: $1\"}" \
+            "$SLACK_WEBHOOK" || true
+    fi
+}
+
+# Script principal
+log "=== Début de la sauvegarde DIFFÉRENTIELLE ==="
+log "Stanza: $STANZA"
+
+START_TIME=$(date +%s)
+
+# Vérifier le conteneur
+if ! docker ps --format '{{ '{{' }}.Names{{ '}}' }}' | grep -q "^${PG_CONTAINER}$"; then
+    log "ERREUR: Container $PG_CONTAINER non trouvé"
+    notify_failure "Container non disponible"
+    exit 1
+fi
+
+# Vérifier qu'une sauvegarde FULL existe
+if ! docker exec "$PG_CONTAINER" pgbackrest --stanza="$STANZA" info | grep -q "full backup"; then
+    log "ATTENTION: Aucune sauvegarde FULL trouvée, exécution d'une FULL à la place"
+    docker exec "$PG_CONTAINER" pgbackrest --stanza="$STANZA" --type=full backup 2>&1 | tee -a "$LOG_FILE"
+else
+    log "Exécution de pgBackRest backup --type=diff..."
+    docker exec "$PG_CONTAINER" pgbackrest --stanza="$STANZA" --type=diff backup 2>&1 | tee -a "$LOG_FILE"
+fi
+
+if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
+    END_TIME=$(date +%s)
+    DURATION=$((END_TIME - START_TIME))
+    log "=== Sauvegarde terminée avec succès ==="
+    log "Durée: ${DURATION} secondes"
+
+    # Nettoyage des anciennes sauvegardes
+    log "Nettoyage des sauvegardes expirées..."
+    docker exec "$PG_CONTAINER" pgbackrest --stanza="$STANZA" expire 2>&1 | tee -a "$LOG_FILE"
+
+    exit 0
+else
+    log "ERREUR: Échec de la sauvegarde"
+    notify_failure "pgBackRest a échoué"
+    exit 1
+fi

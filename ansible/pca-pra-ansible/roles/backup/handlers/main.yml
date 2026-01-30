@@ -1,0 +1,33 @@
+---
+# Handlers pour le rôle de sauvegarde
+
+- name: Reload pgbackrest
+  ansible.builtin.command:
+    cmd: "docker exec {{ pg_container }} pgbackrest --stanza={{ pgbackrest_stanza }} check"
+  failed_when: false
+
+- name: Notify backup success
+  ansible.builtin.include_tasks: notify.yml
+  vars:
+    notification_type: "backup"
+    notification_status: "success"
+    notification_details: "Sauvegarde {{ backup_type | default('full') }} terminée avec succès"
+  when: backup_notify_on_success
+
+- name: Notify backup failure
+  ansible.builtin.include_tasks: notify.yml
+  vars:
+    notification_type: "backup"
+    notification_status: "failure"
+    notification_details: "Échec de la sauvegarde {{ backup_type | default('full') }}"
+  listen: "Backup failed"
+
+- name: Ship backup to standby
+  ansible.builtin.command:
+    cmd: >
+      rsync -avz --progress
+      {{ pgbackrest_repo_path }}/
+      {{ backup_standby_user }}@{{ backup_standby_host }}:{{ pgbackrest_repo_path }}/
+  when: backup_ship_to_standby
+  delegate_to: "{{ inventory_hostname }}"
+  failed_when: false

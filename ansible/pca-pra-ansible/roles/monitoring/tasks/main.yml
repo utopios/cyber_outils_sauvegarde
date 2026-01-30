@@ -1,0 +1,80 @@
+---
+# Rôle monitoring - Configuration du monitoring pour PCA/PRA
+
+- name: Create monitoring directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /opt/finsecure/monitoring
+    - /opt/finsecure/monitoring/prometheus
+    - /opt/finsecure/monitoring/alertmanager
+
+- name: Deploy Prometheus configuration
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /opt/finsecure/monitoring/prometheus/prometheus.yml
+    mode: '0644'
+  notify: Reload prometheus
+
+- name: Deploy Alertmanager configuration
+  ansible.builtin.template:
+    src: alertmanager.yml.j2
+    dest: /opt/finsecure/monitoring/alertmanager/alertmanager.yml
+    mode: '0644'
+  notify: Reload alertmanager
+
+- name: Deploy alert rules
+  ansible.builtin.template:
+    src: alert_rules.yml.j2
+    dest: /opt/finsecure/monitoring/prometheus/alert_rules.yml
+    mode: '0644'
+  notify: Reload prometheus
+
+- name: Deploy monitoring stack
+  community.docker.docker_compose:
+    project_name: monitoring
+    definition:
+      version: '3.8'
+      services:
+        prometheus:
+          image: prom/prometheus:latest
+          container_name: prometheus
+          ports:
+            - "{{ monitoring.prometheus_port }}:9090"
+          volumes:
+            - /opt/finsecure/monitoring/prometheus:/etc/prometheus:ro
+            - prometheus_data:/prometheus
+          command:
+            - '--config.file=/etc/prometheus/prometheus.yml'
+            - '--storage.tsdb.path=/prometheus'
+            - '--web.enable-lifecycle'
+          restart: unless-stopped
+
+        alertmanager:
+          image: prom/alertmanager:latest
+          container_name: alertmanager
+          ports:
+            - "{{ monitoring.alertmanager_port }}:9093"
+          volumes:
+            - /opt/finsecure/monitoring/alertmanager:/etc/alertmanager:ro
+          command:
+            - '--config.file=/etc/alertmanager/alertmanager.yml'
+          restart: unless-stopped
+
+        grafana:
+          image: grafana/grafana:latest
+          container_name: grafana
+          ports:
+            - "{{ monitoring.grafana_port }}:3000"
+          environment:
+            - GF_SECURITY_ADMIN_PASSWORD=admin
+          volumes:
+            - grafana_data:/var/lib/grafana
+          restart: unless-stopped
+
+      volumes:
+        prometheus_data:
+        grafana_data:
+  when: deploy_monitoring_stack | default(false)

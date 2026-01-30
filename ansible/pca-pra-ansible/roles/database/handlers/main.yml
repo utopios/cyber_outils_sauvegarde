@@ -1,0 +1,13 @@
+---
+# Handlers pour le rôle database
+
+- name: Reload postgresql
+  ansible.builtin.command:
+    cmd: "docker exec {{ pg_container }} pg_ctl reload -D /var/lib/postgresql/data/pgdata"
+  ignore_errors: true
+
+- name: Restart postgresql
+  community.docker.docker_container:
+    name: "{{ pg_container }}"
+    state: started
+    restart: true

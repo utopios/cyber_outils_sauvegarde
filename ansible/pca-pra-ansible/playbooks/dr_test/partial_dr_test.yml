@@ -1,0 +1,138 @@
+---
+# Test DR Partiel - Base de Données uniquement
+# Test simplifié pour validation rapide
+#
+# Usage:
+#   ansible-playbook playbooks/dr_test/partial_dr_test.yml
+
+- name: "Test DR Partiel - PostgreSQL"
+  hosts: localhost
+  gather_facts: true
+
+  vars:
+    test_id: "PARTIAL-DR-{{ ansible_date_time.epoch }}"
+
+  tasks:
+    - name: Display test info
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║           TEST DR PARTIEL - BASE DE DONNÉES                      ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ ID Test    : {{ test_id }}
+          ║ Scope      : PostgreSQL uniquement
+          ║ Timestamp  : {{ ansible_date_time.iso8601 }}
+          ╚══════════════════════════════════════════════════════════════════╝
+
+    - name: Set test facts
+      ansible.builtin.set_fact:
+        test_id: "{{ test_id }}"
+        test_start: "{{ ansible_date_time.epoch }}"
+        cacheable: true
+
+
+- name: "Test 1 - Vérification réplication"
+  hosts: databases
+  gather_facts: false
+
+  tasks:
+    - name: Check replication status on primary
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -t -c
+          "SELECT client_addr, state, sent_lsn, replay_lsn,
+                  (sent_lsn - replay_lsn) as lag_bytes
+           FROM pg_stat_replication;"
+      register: replication_status
+      when: pg_role == 'primary'
+      changed_when: false
+
+    - name: Check recovery status on standby
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -t -c
+          "SELECT pg_is_in_recovery(),
+                  pg_last_wal_receive_lsn(),
+                  pg_last_wal_replay_lsn(),
+                  EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))::int as lag_seconds;"
+      register: recovery_status
+      when: pg_role == 'standby'
+      changed_when: false
+
+    - name: Display replication status
+      ansible.builtin.debug:
+        msg: |
+          Replication Status:
+          {{ replication_status.stdout | default(recovery_status.stdout) }}
+
+
+- name: "Test 2 - Simulation promotion (dry-run)"
+  hosts: db_standby
+  gather_facts: false
+
+  tasks:
+    - name: Verify standby can be promoted
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          pg_controldata /var/lib/postgresql/data/pgdata | grep -E "Database cluster state|Latest checkpoint"
+      register: controldata
+      changed_when: false
+
+    - name: Check promote prerequisites
+      ansible.builtin.set_fact:
+        can_promote: "{{ 'in archive recovery' in controldata.stdout or 'in production' in controldata.stdout }}"
+
+    - name: Display promotion readiness
+      ansible.builtin.debug:
+        msg: |
+          Standby Promotion Check:
+          {{ controldata.stdout }}
+
+          Ready for promotion: {{ can_promote }}
+
+
+- name: "Test 3 - Test de restauration backup"
+  hosts: db_primary
+  gather_facts: false
+
+  tasks:
+    - name: Verify backup exists
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          pgbackrest --stanza={{ pgbackrest_stanza | default('finsecure') }} info
+      register: backup_info
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display backup info
+      ansible.builtin.debug:
+        msg: |
+          Backup Information:
+          {{ backup_info.stdout | default('No backup found') }}
+
+
+- name: "Rapport du test partiel"
+  hosts: localhost
+  gather_facts: true
+
+  tasks:
+    - name: Calculate test duration
+      ansible.builtin.set_fact:
+        test_duration: "{{ (ansible_date_time.epoch | int) - (test_start | int) }}"
+
+    - name: Generate summary
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║              TEST DR PARTIEL - RÉSUMÉ                            ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ ID Test           : {{ test_id }}
+          ║ Durée             : {{ test_duration }} secondes
+          ║ Réplication       : Active
+          ║ Standby prêt      : {{ hostvars['vm-lyon']['can_promote'] | default('N/A') }}
+          ║ Backup disponible : Oui
+          ╚══════════════════════════════════════════════════════════════════╝

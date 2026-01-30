@@ -1,0 +1,191 @@
+---
+# Docker Compose pour DC-PARIS (Site Principal)
+# Déployer sur la VM Paris: docker-compose -f docker-compose-paris.yml up -d
+
+version: '3.8'
+
+networks:
+  dc_paris_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
+
+volumes:
+  pg_data_paris:
+  pgbackrest_data:
+  redis_data_paris:
+  haproxy_config:
+
+services:
+  # ============================================
+  # POSTGRESQL PRIMARY
+  # ============================================
+  postgres-primary:
+    image: postgres:15
+    container_name: postgres-primary
+    hostname: postgres-primary
+    restart: unless-stopped
+    networks:
+      dc_paris_net:
+        ipv4_address: 172.20.0.10
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: P@ssw0rd2024!
+      POSTGRES_DB: finsecure_transactions
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pg_data_paris:/var/lib/postgresql/data
+      - pgbackrest_data:/var/lib/pgbackrest
+      - ./configs/postgres/primary/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./configs/postgres/primary/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./configs/postgres/init:/docker-entrypoint-initdb.d:ro
+    command: >
+      postgres
+      -c config_file=/etc/postgresql/postgresql.conf
+      -c hba_file=/etc/postgresql/pg_hba.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d finsecure_transactions"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ============================================
+  # REDIS MASTER
+  # ============================================
+  redis-paris:
+    image: redis:7-alpine
+    container_name: redis-paris
+    hostname: redis-paris
+    restart: unless-stopped
+    networks:
+      dc_paris_net:
+        ipv4_address: 172.20.0.20
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data_paris:/data
+      - ./configs/redis/master.conf:/usr/local/etc/redis/redis.conf:ro
+    command: redis-server /usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "R3d1sP@ss!", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # APPLICATION API - Instance 1
+  # ============================================
+  app-paris-01:
+    image: nginx:alpine
+    container_name: app-paris-01
+    hostname: app-paris-01
+    restart: unless-stopped
+    networks:
+      dc_paris_net:
+        ipv4_address: 172.20.0.30
+    ports:
+      - "8081:8080"
+    environment:
+      - DATACENTER=paris
+      - INSTANCE=01
+      - DB_HOST=postgres-primary
+      - DB_PORT=5432
+      - REDIS_HOST=redis-paris
+      - REDIS_PORT=6379
+    volumes:
+      - ./configs/app/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./configs/app/html:/usr/share/nginx/html:ro
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      redis-paris:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ============================================
+  # APPLICATION API - Instance 2
+  # ============================================
+  app-paris-02:
+    image: nginx:alpine
+    container_name: app-paris-02
+    hostname: app-paris-02
+    restart: unless-stopped
+    networks:
+      dc_paris_net:
+        ipv4_address: 172.20.0.31
+    ports:
+      - "8082:8080"
+    environment:
+      - DATACENTER=paris
+      - INSTANCE=02
+      - DB_HOST=postgres-primary
+      - DB_PORT=5432
+      - REDIS_HOST=redis-paris
+      - REDIS_PORT=6379
+    volumes:
+      - ./configs/app/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./configs/app/html:/usr/share/nginx/html:ro
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      redis-paris:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ============================================
+  # HAPROXY LOAD BALANCER (Primary)
+  # ============================================
+  haproxy-paris:
+    image: haproxy:2.8
+    container_name: haproxy-paris
+    hostname: haproxy-paris
+    restart: unless-stopped
+    networks:
+      dc_paris_net:
+        ipv4_address: 172.20.0.5
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8404:8404"
+    volumes:
+      - ./configs/haproxy/haproxy-paris.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - app-paris-01
+      - app-paris-02
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================
+  # PGBACKREST (pour sauvegardes)
+  # ============================================
+  pgbackrest:
+    image: pgbackrest/pgbackrest:latest
+    container_name: pgbackrest-paris
+    hostname: pgbackrest-paris
+    restart: unless-stopped
+    networks:
+      dc_paris_net:
+        ipv4_address: 172.20.0.50
+    volumes:
+      - pg_data_paris:/var/lib/postgresql/data:ro
+      - pgbackrest_data:/var/lib/pgbackrest
+      - ./configs/pgbackrest/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
+    depends_on:
+      postgres-primary:
+        condition: service_healthy

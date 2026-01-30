@@ -1,0 +1,52 @@
+---
+# Rôle application - Déploiement des serveurs d'application
+
+- name: Create application config directory
+  ansible.builtin.file:
+    path: /opt/finsecure/config/app
+    state: directory
+    mode: '0755'
+
+- name: Deploy application configuration
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: /opt/finsecure/config/app/nginx.conf
+    mode: '0644'
+
+- name: Deploy application containers
+  community.docker.docker_container:
+    name: "{{ item.name }}"
+    image: "nginx:alpine"
+    state: "{{ item.state | default('started') }}"
+    restart_policy: unless-stopped
+    networks:
+      - name: "{{ docker_networks[0].name }}"
+    ports:
+      - "{{ item.host_port }}:{{ item.container_port }}"
+    env: "{{ item.env }}"
+    volumes:
+      - /opt/finsecure/config/app/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /opt/finsecure/config/app/html:/usr/share/nginx/html:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:{{ item.container_port }}/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+  loop: "{{ app_instances }}"
+  when: app_instances is defined
+
+- name: Wait for applications to be healthy
+  ansible.builtin.uri:
+    url: "http://localhost:{{ item.host_port }}/health"
+    method: GET
+    status_code: 200
+    timeout: 10
+  loop: "{{ app_instances }}"
+  register: app_health
+  until: app_health.status == 200
+  retries: 10
+  delay: 5
+  when:
+    - app_instances is defined
+    - item.state | default('started') == 'started'
+  ignore_errors: true

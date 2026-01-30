@@ -1,0 +1,99 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+#
+# Vagrantfile pour simuler les deux datacenters FinSecure
+# DC-PARIS (Primary) et DC-LYON (Standby)
+
+Vagrant.configure("2") do |config|
+
+  # Box ARM64 compatible VirtualBox pour Apple Silicon
+  config.vm.box = "net9/ubuntu-24.04-arm64"
+
+  # ============================================
+  # DC-PARIS (Site Principal)
+  # ============================================
+  config.vm.define "vm-paris", primary: true do |paris|
+    paris.vm.hostname = "vm-paris"
+    paris.vm.network "private_network", ip: "192.168.56.10"
+
+    # Port forwards pour accès externe
+    paris.vm.network "forwarded_port", guest: 80, host: 8080    # HAProxy HTTP
+    paris.vm.network "forwarded_port", guest: 443, host: 8443   # HAProxy HTTPS
+    paris.vm.network "forwarded_port", guest: 5432, host: 15432 # PostgreSQL
+    paris.vm.network "forwarded_port", guest: 6379, host: 16379 # Redis
+    paris.vm.network "forwarded_port", guest: 8404, host: 18404 # HAProxy Stats
+
+    paris.vm.provider "virtualbox" do |vb|
+      vb.name = "finsecure-dc-paris"
+      vb.memory = 4096
+      vb.cpus = 2
+    end
+
+    # Provisioning
+    paris.vm.provision "shell", inline: <<-SHELL
+      apt-get update
+      apt-get install -y docker.io docker-compose python3-pip
+      systemctl enable docker
+      systemctl start docker
+      usermod -aG docker vagrant
+
+      # Créer les répertoires
+      mkdir -p /opt/finsecure/{docker,config,scripts}
+      mkdir -p /var/log/finsecure
+      chown -R vagrant:vagrant /opt/finsecure
+    SHELL
+
+    # Synchronisation des fichiers Docker
+    paris.vm.synced_folder "./docker", "/opt/finsecure/docker", type: "rsync"
+  end
+
+  # ============================================
+  # DC-LYON (Site de Secours)
+  # ============================================
+  config.vm.define "vm-lyon" do |lyon|
+    lyon.vm.hostname = "vm-lyon"
+    lyon.vm.network "private_network", ip: "192.168.56.20"
+
+    # Port forwards (décalés pour éviter les conflits)
+    lyon.vm.network "forwarded_port", guest: 80, host: 9080    # HAProxy HTTP
+    lyon.vm.network "forwarded_port", guest: 443, host: 9443   # HAProxy HTTPS
+    lyon.vm.network "forwarded_port", guest: 5432, host: 15433 # PostgreSQL
+    lyon.vm.network "forwarded_port", guest: 6379, host: 16380 # Redis
+    lyon.vm.network "forwarded_port", guest: 8404, host: 19404 # HAProxy Stats
+
+    lyon.vm.provider "virtualbox" do |vb|
+      vb.name = "finsecure-dc-lyon"
+      vb.memory = 4096
+      vb.cpus = 2
+    end
+
+    # Provisioning
+    lyon.vm.provision "shell", inline: <<-SHELL
+      apt-get update
+      apt-get install -y docker.io docker-compose python3-pip
+      systemctl enable docker
+      systemctl start docker
+      usermod -aG docker vagrant
+
+      mkdir -p /opt/finsecure/{docker,config,scripts}
+      mkdir -p /var/log/finsecure
+      chown -R vagrant:vagrant /opt/finsecure
+    SHELL
+
+    lyon.vm.synced_folder "./docker", "/opt/finsecure/docker", type: "rsync"
+  end
+
+  # ============================================
+  # Provisioning Ansible (après création des VMs)
+  # ============================================
+  config.vm.provision "ansible" do |ansible|
+    ansible.playbook = "playbooks/site.yml"
+    ansible.inventory_path = "inventories/production/hosts.yml"
+    ansible.limit = "all"
+    ansible.verbose = "v"
+    ansible.extra_vars = {
+      ansible_python_interpreter: "/usr/bin/python3"
+    }
+  end
+
+end

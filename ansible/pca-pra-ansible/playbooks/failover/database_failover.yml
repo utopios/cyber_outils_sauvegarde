@@ -1,0 +1,319 @@
+---
+# Playbook de Failover PostgreSQL
+# ATTENTION: Ce playbook sera exécuté en situation de crise
+# La clarté, l'idempotence et la traçabilité sont cruciales
+#
+# RTO cible: 15 minutes pour la base de données
+#
+# Usage:
+#   ansible-playbook playbooks/failover/database_failover.yml
+#   ansible-playbook playbooks/failover/database_failover.yml --check  # Dry-run
+#   ansible-playbook playbooks/failover/database_failover.yml -e force_failover=true
+
+- name: "Phase 0 - Initialisation et Validation"
+  hosts: localhost
+  gather_facts: true
+  vars:
+    failover_id: "FO-{{ ansible_date_time.epoch }}"
+    force_failover: false
+
+  tasks:
+    - name: Display failover warning
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║     ⚠️  FAILOVER BASE DE DONNÉES - OPÉRATION CRITIQUE ⚠️          ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ ID Failover    : {{ failover_id }}
+          ║ Timestamp      : {{ ansible_date_time.iso8601 }}
+          ║ Mode           : {{ 'FORCÉ' if force_failover else 'STANDARD' }}
+          ║ RTO Cible      : 15 minutes
+          ╚══════════════════════════════════════════════════════════════════╝
+
+    - name: Create failover log file
+      ansible.builtin.file:
+        path: "/var/log/finsecure/failover_{{ failover_id }}.log"
+        state: touch
+        mode: '0644'
+      delegate_to: localhost
+      become: true
+      failed_when: false
+
+    - name: Set failover facts
+      ansible.builtin.set_fact:
+        failover_start_time: "{{ ansible_date_time.epoch }}"
+        failover_id: "{{ failover_id }}"
+        cacheable: true
+
+
+- name: "Phase 1 - Vérification de l'état du Primary (DC Paris)"
+  hosts: db_primary
+  gather_facts: false
+  ignore_unreachable: true
+
+  tasks:
+    - name: Check if primary is reachable
+      ansible.builtin.ping:
+      register: primary_ping
+      ignore_errors: true
+      timeout: 10
+
+    - name: Check PostgreSQL primary status
+      ansible.builtin.command:
+        cmd: "docker exec {{ pg_container }} pg_isready -U postgres"
+      register: primary_pg_status
+      ignore_errors: true
+      timeout: 15
+      when: primary_ping is succeeded
+
+    - name: Set primary status fact
+      ansible.builtin.set_fact:
+        primary_available: "{{ primary_ping is succeeded and primary_pg_status.rc | default(1) == 0 }}"
+        cacheable: true
+
+    - name: Log primary status
+      ansible.builtin.debug:
+        msg: |
+          État du Primary (Paris):
+          - Accessible: {{ primary_ping is succeeded }}
+          - PostgreSQL: {{ 'UP' if primary_pg_status.rc | default(1) == 0 else 'DOWN' }}
+
+    - name: Attempt graceful shutdown of primary (if reachable)
+      block:
+        - name: Stop accepting new connections
+          ansible.builtin.command:
+            cmd: >
+              docker exec {{ pg_container }}
+              psql -U postgres -c
+              "ALTER SYSTEM SET max_connections = 0;
+               SELECT pg_reload_conf();"
+          ignore_errors: true
+
+        - name: Wait for active connections to complete
+          ansible.builtin.command:
+            cmd: >
+              docker exec {{ pg_container }}
+              psql -U postgres -t -c
+              "SELECT count(*) FROM pg_stat_activity WHERE state = 'active';"
+          register: active_connections
+          until: active_connections.stdout | trim | int == 0
+          retries: 6
+          delay: 5
+          ignore_errors: true
+
+        - name: Graceful PostgreSQL shutdown
+          ansible.builtin.command:
+            cmd: "docker exec {{ pg_container }} pg_ctl stop -m fast -D /var/lib/postgresql/data/pgdata"
+          ignore_errors: true
+          timeout: 30
+      when:
+        - primary_ping is succeeded
+        - not force_failover | default(false)
+
+
+- name: "Phase 2 - Vérification du Standby (DC Lyon)"
+  hosts: db_standby
+  gather_facts: true
+
+  tasks:
+    - name: Verify standby container is running
+      ansible.builtin.command:
+        cmd: "docker ps --filter name={{ pg_container }} --format '{{ '{{' }}.Status{{ '}}' }}'"
+      register: standby_container_status
+      changed_when: false
+
+    - name: Check standby PostgreSQL status
+      ansible.builtin.command:
+        cmd: "docker exec {{ pg_container }} pg_isready -U postgres"
+      register: standby_pg_ready
+      changed_when: false
+      failed_when: standby_pg_ready.rc != 0
+
+    - name: Verify standby is in recovery mode
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -t -c "SELECT pg_is_in_recovery();"
+      register: is_in_recovery
+      changed_when: false
+
+    - name: Get current replication lag
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -t -c
+          "SELECT COALESCE(EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))::int, 0);"
+      register: replication_lag
+      changed_when: false
+
+    - name: Display standby status
+      ansible.builtin.debug:
+        msg: |
+          État du Standby (Lyon):
+          - Container: {{ 'Running' if 'Up' in standby_container_status.stdout else 'Stopped' }}
+          - PostgreSQL: Ready
+          - Mode Recovery: {{ 't' in is_in_recovery.stdout }}
+          - Lag réplication: {{ replication_lag.stdout | trim }} secondes
+
+    - name: Fail if standby is not in recovery mode
+      ansible.builtin.fail:
+        msg: "ERREUR CRITIQUE: Le standby n'est pas en mode recovery!"
+      when: "'t' not in is_in_recovery.stdout"
+
+    - name: Warn if replication lag exceeds RPO
+      ansible.builtin.debug:
+        msg: "⚠️  ATTENTION: Lag de réplication de {{ replication_lag.stdout | trim }} secondes (RPO: 300s)"
+      when: replication_lag.stdout | trim | int > 300
+
+
+- name: "Phase 3 - Promotion du Standby"
+  hosts: db_standby
+  gather_facts: false
+
+  tasks:
+    - name: Log promotion start
+      ansible.builtin.debug:
+        msg: ">>> Début de la promotion du standby PostgreSQL..."
+
+    - name: Create promotion trigger file
+      ansible.builtin.command:
+        cmd: "docker exec {{ pg_container }} touch /tmp/promote.trigger"
+      register: trigger_created
+
+    - name: Promote standby to primary using pg_ctl
+      ansible.builtin.command:
+        cmd: "docker exec {{ pg_container }} pg_ctl promote -D /var/lib/postgresql/data/pgdata"
+      register: promote_result
+      timeout: 60
+
+    - name: Wait for promotion to complete
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -t -c "SELECT pg_is_in_recovery();"
+      register: recovery_check
+      until: "'f' in recovery_check.stdout"
+      retries: 12
+      delay: 5
+      changed_when: false
+
+    - name: Verify promotion succeeded
+      ansible.builtin.assert:
+        that:
+          - "'f' in recovery_check.stdout"
+        fail_msg: "ÉCHEC: La promotion n'a pas abouti après 60 secondes"
+        success_msg: "✓ Promotion réussie - Le standby est maintenant Primary"
+
+    - name: Update PostgreSQL configuration for primary role
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -c
+          "ALTER SYSTEM SET synchronous_standby_names = '';
+           SELECT pg_reload_conf();"
+      register: config_update
+
+    - name: Display promotion result
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║              ✓ PROMOTION POSTGRESQL RÉUSSIE                      ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ Nouveau Primary : {{ inventory_hostname }} (DC Lyon)
+          ║ Timestamp       : {{ ansible_date_time.iso8601 }}
+          ╚══════════════════════════════════════════════════════════════════╝
+
+
+- name: "Phase 4 - Validation post-failover"
+  hosts: db_standby
+  gather_facts: true
+
+  tasks:
+    - name: Test database connectivity
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -d finsecure_transactions -c "SELECT 1;"
+      register: db_test
+      changed_when: false
+
+    - name: Test write capability
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -d finsecure_transactions -c
+          "CREATE TABLE IF NOT EXISTS failover_test (id serial, ts timestamp default now());
+           INSERT INTO failover_test (ts) VALUES (now());
+           SELECT count(*) FROM failover_test;
+           DROP TABLE failover_test;"
+      register: write_test
+      changed_when: false
+
+    - name: Verify all databases are accessible
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -c "\l"
+      register: db_list
+      changed_when: false
+
+    - name: Validation results
+      ansible.builtin.debug:
+        msg: |
+          === Résultats de validation ===
+          - Connectivité DB: {{ 'OK' if db_test.rc == 0 else 'ÉCHEC' }}
+          - Test écriture: {{ 'OK' if write_test.rc == 0 else 'ÉCHEC' }}
+
+    - name: Fail if validation failed
+      ansible.builtin.fail:
+        msg: "ERREUR: La validation post-failover a échoué. Rollback nécessaire!"
+      when: db_test.rc != 0 or write_test.rc != 0
+
+
+- name: "Phase 5 - Notification et Documentation"
+  hosts: localhost
+  gather_facts: true
+
+  vars:
+    failover_end_time: "{{ ansible_date_time.epoch }}"
+
+  tasks:
+    - name: Calculate failover duration
+      ansible.builtin.set_fact:
+        failover_duration: "{{ (failover_end_time | int) - (hostvars['localhost']['failover_start_time'] | int) }}"
+
+    - name: Display failover summary
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║              FAILOVER BASE DE DONNÉES - TERMINÉ                  ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ ID Failover     : {{ hostvars['localhost']['failover_id'] }}
+          ║ Durée totale    : {{ failover_duration }} secondes
+          ║ RTO respecté    : {{ 'OUI ✓' if failover_duration | int < 900 else 'NON ✗' }}
+          ║ Nouveau Primary : DC Lyon (vm-lyon)
+          ╚══════════════════════════════════════════════════════════════════╝
+
+    - name: Send notification
+      ansible.builtin.uri:
+        url: "{{ notifications.slack.webhook_url }}"
+        method: POST
+        body_format: json
+        body:
+          text: |
+            :rotating_light: *FAILOVER DATABASE TERMINÉ*
+            • ID: {{ hostvars['localhost']['failover_id'] }}
+            • Durée: {{ failover_duration }}s
+            • RTO: {{ 'Respecté' if failover_duration | int < 900 else 'Dépassé' }}
+            • Nouveau Primary: DC Lyon
+      when: notifications.slack.enabled | default(false)
+      failed_when: false
+
+    - name: Log failover completion
+      ansible.builtin.lineinfile:
+        path: /var/log/finsecure/failover_audit.log
+        line: "{{ ansible_date_time.iso8601 }} | DATABASE_FAILOVER | {{ hostvars['localhost']['failover_id'] }} | PARIS->LYON | {{ failover_duration }}s | SUCCESS"
+        create: true
+        mode: '0644'
+      become: true
+      failed_when: false

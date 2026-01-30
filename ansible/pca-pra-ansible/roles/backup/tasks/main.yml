@@ -1,0 +1,59 @@
+---
+# Rôle de sauvegarde PostgreSQL avec pgBackRest
+# Conforme aux exigences RPO du BIA FinSecure
+
+- name: Include OS-specific variables
+  ansible.builtin.include_vars: "{{ ansible_os_family | lower }}.yml"
+  failed_when: false
+
+- name: Ensure backup directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: '0750'
+  loop:
+    - "{{ pgbackrest_repo_path }}"
+    - "{{ pgbackrest_log_path }}"
+    - "{{ pgbackrest_spool_path }}"
+
+- name: Deploy pgBackRest configuration
+  ansible.builtin.template:
+    src: pgbackrest.conf.j2
+    dest: /etc/pgbackrest/pgbackrest.conf
+    owner: postgres
+    group: postgres
+    mode: '0640'
+  notify: Reload pgbackrest
+
+- name: Create pgBackRest stanza
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ pg_container }}
+      pgbackrest --stanza={{ pgbackrest_stanza }} stanza-create
+  register: stanza_result
+  changed_when: stanza_result.rc == 0
+  failed_when: false
+  when: pg_role == 'primary'
+
+- name: Verify stanza configuration
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ pg_container }}
+      pgbackrest --stanza={{ pgbackrest_stanza }} check
+  register: stanza_check
+  changed_when: false
+  failed_when: stanza_check.rc != 0
+  when: pg_role == 'primary'
+
+- name: Include backup tasks based on role
+  ansible.builtin.include_tasks: "{{ pg_role }}_backup.yml"
+
+- name: Setup backup cron jobs
+  ansible.builtin.include_tasks: cron.yml
+  when: pg_role == 'primary'
+
+- name: Setup backup verification
+  ansible.builtin.include_tasks: verify.yml
+  when: backup_verify_enabled

@@ -1,0 +1,67 @@
+---
+# Configuration spécifique pour PostgreSQL Standby
+
+- name: Deploy standby PostgreSQL configuration
+  ansible.builtin.template:
+    src: postgresql-standby.conf.j2
+    dest: /opt/finsecure/config/postgres/postgresql.conf
+    mode: '0644'
+
+- name: Deploy pg_hba.conf for standby
+  ansible.builtin.template:
+    src: pg_hba-standby.conf.j2
+    dest: /opt/finsecure/config/postgres/pg_hba.conf
+    mode: '0644'
+
+- name: Check if standby needs initialization
+  ansible.builtin.stat:
+    path: /var/lib/docker/volumes/pg_data_{{ datacenter }}/_data/pgdata/PG_VERSION
+  register: pg_data_exists
+
+- name: Initialize standby from primary
+  block:
+    - name: Stop standby container for initialization
+      community.docker.docker_container:
+        name: "{{ pg_container }}"
+        state: stopped
+
+    - name: Clean data directory
+      ansible.builtin.file:
+        path: /var/lib/docker/volumes/pg_data_{{ datacenter }}/_data/pgdata
+        state: absent
+
+    - name: Run pg_basebackup from primary
+      ansible.builtin.command:
+        cmd: >
+          docker run --rm
+          --network {{ docker_networks[0].name }}
+          -v pg_data_{{ datacenter }}:/var/lib/postgresql/data
+          -e PGPASSWORD={{ postgresql.replication_password }}
+          postgres:{{ postgresql.version }}
+          pg_basebackup
+          -h {{ pg_replication_config.primary_host }}
+          -p {{ pg_replication_config.primary_port }}
+          -U {{ postgresql.replication_user }}
+          -D /var/lib/postgresql/data/pgdata
+          -Fp -Xs -P -R
+      async: 1800
+      poll: 30
+
+    - name: Create standby.signal file
+      ansible.builtin.command:
+        cmd: >
+          docker run --rm
+          -v pg_data_{{ datacenter }}:/var/lib/postgresql/data
+          postgres:{{ postgresql.version }}
+          touch /var/lib/postgresql/data/pgdata/standby.signal
+  when: not pg_data_exists.stat.exists
+
+- name: Verify standby is in recovery mode
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ pg_container }}
+      psql -U {{ postgresql.admin_user }} -t -c "SELECT pg_is_in_recovery();"
+  register: recovery_check
+  changed_when: false
+  failed_when: "'t' not in recovery_check.stdout"
+  ignore_errors: true

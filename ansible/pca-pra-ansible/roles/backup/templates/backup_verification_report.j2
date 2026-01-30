@@ -1,0 +1,75 @@
+================================================================================
+                    RAPPORT DE VÉRIFICATION DES SAUVEGARDES
+                              FinSecure PCA/PRA
+================================================================================
+
+Date du rapport    : {{ ansible_date_time.iso8601 }}
+Serveur            : {{ inventory_hostname }}
+Datacenter         : {{ dc_name | default('N/A') }}
+Rôle PostgreSQL    : {{ pg_role | default('N/A') }}
+Stanza             : {{ pgbackrest_stanza }}
+
+--------------------------------------------------------------------------------
+                           RÉSULTAT DE LA VÉRIFICATION
+--------------------------------------------------------------------------------
+
+Statut global      : {{ 'SUCCÈS' if verify_result.rc | default(1) == 0 else 'ÉCHEC' }}
+
+{% if verify_result.stdout is defined %}
+Détails:
+{{ verify_result.stdout }}
+{% endif %}
+
+{% if verify_result.stderr is defined and verify_result.stderr | length > 0 %}
+Erreurs:
+{{ verify_result.stderr }}
+{% endif %}
+
+--------------------------------------------------------------------------------
+                          INFORMATIONS DE SAUVEGARDE
+--------------------------------------------------------------------------------
+
+{% if backup_details is defined %}
+Nombre de sauvegardes: {{ backup_details | length }}
+
+{% for backup in backup_details %}
+Backup #{{ loop.index }}:
+  - Type          : {{ backup.type | default('N/A') }}
+  - Timestamp     : {{ backup.timestamp | default('N/A') }}
+  - Taille        : {{ backup.size | default('N/A') }}
+  - WAL           : {{ backup.wal | default('N/A') }}
+{% endfor %}
+{% else %}
+Informations de sauvegarde non disponibles
+{% endif %}
+
+--------------------------------------------------------------------------------
+                             CONFORMITÉ RPO
+--------------------------------------------------------------------------------
+
+Exigences RPO par service:
+  - API Paiement      : {{ pca_requirements.api_paiement.rpo_minutes }} minutes (synchrone)
+  - Base transactions : {{ pca_requirements.base_transactions.rpo_minutes }} minutes
+  - Portail client    : {{ pca_requirements.portail_client.rpo_minutes }} minutes
+  - Back-office       : {{ pca_requirements.back_office.rpo_minutes }} minutes
+
+Statut de conformité: {% if backup_age_ok | default(false) %}CONFORME{% else %}À VÉRIFIER{% endif %}
+
+--------------------------------------------------------------------------------
+                          RECOMMANDATIONS
+--------------------------------------------------------------------------------
+
+{% if verify_result.rc | default(1) != 0 %}
+⚠️  La vérification a échoué. Actions recommandées:
+   1. Vérifier les logs pgBackRest: {{ pgbackrest_log_path }}
+   2. S'assurer que PostgreSQL est accessible
+   3. Vérifier l'espace disque disponible
+   4. Relancer une sauvegarde manuelle si nécessaire
+{% else %}
+✓  Les sauvegardes sont valides et restaurables.
+   Prochaine vérification planifiée selon la configuration cron.
+{% endif %}
+
+================================================================================
+                              FIN DU RAPPORT
+================================================================================

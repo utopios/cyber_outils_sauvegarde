@@ -1,0 +1,137 @@
+groups:
+  - name: pca_pra_alerts
+    rules:
+      # Alertes PostgreSQL
+      - alert: PostgreSQLDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: "PostgreSQL est down sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Le serveur PostgreSQL est inaccessible. RTO: 15 minutes."
+
+      - alert: PostgreSQLReplicationLag
+        expr: pg_replication_lag_seconds > 300
+        for: 2m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "Lag de réplication PostgreSQL élevé"
+          description: "Le lag de réplication est de {{ '{{' }} $value {{ '}}' }} secondes (seuil: 300s / RPO: 5min)"
+
+      - alert: PostgreSQLReplicationStopped
+        expr: pg_stat_replication_pg_wal_lsn_diff == 0 and pg_up == 1
+        for: 5m
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: "Réplication PostgreSQL arrêtée"
+          description: "La réplication streaming semble arrêtée. Vérifier la connexion au standby."
+
+      # Alertes HAProxy
+      - alert: HAProxyDown
+        expr: haproxy_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: loadbalancer
+        annotations:
+          summary: "HAProxy est down"
+          description: "Le load balancer HAProxy est inaccessible."
+
+      - alert: HAProxyBackendDown
+        expr: haproxy_backend_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: application
+        annotations:
+          summary: "Backend HAProxy indisponible"
+          description: "Tous les serveurs du backend {{ '{{' }} $labels.backend {{ '}}' }} sont down."
+
+      - alert: HAProxyHighErrorRate
+        expr: rate(haproxy_backend_http_responses_total{code="5xx"}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: application
+        annotations:
+          summary: "Taux d'erreur HTTP élevé"
+          description: "Plus de 10% d'erreurs 5xx sur le backend {{ '{{' }} $labels.backend {{ '}}' }}"
+
+      # Alertes Application
+      - alert: ApplicationDown
+        expr: probe_success{job="blackbox"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: application
+        annotations:
+          summary: "Application inaccessible"
+          description: "L'application {{ '{{' }} $labels.instance {{ '}}' }} ne répond pas aux health checks."
+
+      - alert: ApplicationHighLatency
+        expr: probe_duration_seconds{job="blackbox"} > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: application
+        annotations:
+          summary: "Latence application élevée"
+          description: "Latence de {{ '{{' }} $value {{ '}}' }}s sur {{ '{{' }} $labels.instance {{ '}}' }}"
+
+      # Alertes Redis
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: cache
+        annotations:
+          summary: "Redis est down"
+          description: "Le serveur Redis {{ '{{' }} $labels.instance {{ '}}' }} est inaccessible."
+
+      - alert: RedisReplicationBroken
+        expr: redis_connected_slaves < 1 and redis_role == "master"
+        for: 5m
+        labels:
+          severity: warning
+          service: cache
+        annotations:
+          summary: "Réplication Redis interrompue"
+          description: "Le master Redis n'a plus de replica connecté."
+
+      # Alertes Infrastructure
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 90
+        for: 10m
+        labels:
+          severity: warning
+          service: infrastructure
+        annotations:
+          summary: "Utilisation CPU élevée"
+          description: "CPU à {{ '{{' }} $value | printf \"%.1f\" {{ '}}' }}% sur {{ '{{' }} $labels.instance {{ '}}' }}"
+
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 90
+        for: 10m
+        labels:
+          severity: warning
+          service: infrastructure
+        annotations:
+          summary: "Mémoire faible"
+          description: "Utilisation mémoire à {{ '{{' }} $value | printf \"%.1f\" {{ '}}' }}% sur {{ '{{' }} $labels.instance {{ '}}' }}"
+
+      - alert: DiskSpaceLow
+        expr: (1 - (node_filesystem_avail_bytes / node_filesystem_size_bytes)) * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+          service: infrastructure
+        annotations:
+          summary: "Espace disque faible"
+          description: "Disque à {{ '{{' }} $value | printf \"%.1f\" {{ '}}' }}% sur {{ '{{' }} $labels.instance {{ '}}' }}:{{ '{{' }} $labels.mountpoint {{ '}}' }}"

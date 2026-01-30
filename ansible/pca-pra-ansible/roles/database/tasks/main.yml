@@ -1,0 +1,47 @@
+---
+# Rôle database - Déploiement et configuration PostgreSQL
+
+- name: Include role-specific tasks
+  ansible.builtin.include_tasks: "{{ pg_role }}.yml"
+
+- name: Deploy PostgreSQL container
+  community.docker.docker_container:
+    name: "{{ pg_container }}"
+    image: "postgres:{{ postgresql.version }}"
+    state: started
+    restart_policy: unless-stopped
+    networks:
+      - name: "{{ docker_networks[0].name }}"
+    ports:
+      - "{{ postgresql.port }}:5432"
+    env:
+      POSTGRES_USER: "{{ postgresql.admin_user }}"
+      POSTGRES_PASSWORD: "{{ postgresql.admin_password }}"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - "pg_data_{{ datacenter }}:/var/lib/postgresql/data"
+      - "/opt/finsecure/config/postgres:/etc/postgresql:ro"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{ postgresql.admin_user }}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+  register: pg_container_result
+
+- name: Wait for PostgreSQL to be ready
+  ansible.builtin.command:
+    cmd: "docker exec {{ pg_container }} pg_isready -U {{ postgresql.admin_user }}"
+  register: pg_ready
+  until: pg_ready.rc == 0
+  retries: 30
+  delay: 2
+  changed_when: false
+
+- name: Configure PostgreSQL
+  ansible.builtin.include_tasks: configure.yml
+  when: pg_container_result.changed
+
+- name: Setup pgBackRest
+  ansible.builtin.include_tasks: pgbackrest.yml
+  when: pg_role == 'primary'

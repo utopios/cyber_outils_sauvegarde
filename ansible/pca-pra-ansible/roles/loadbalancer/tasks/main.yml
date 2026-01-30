@@ -1,0 +1,47 @@
+---
+# Rôle loadbalancer - Déploiement et configuration HAProxy
+
+- name: Create HAProxy config directory
+  ansible.builtin.file:
+    path: /opt/finsecure/config/haproxy
+    state: directory
+    mode: '0755'
+
+- name: Deploy HAProxy configuration
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /opt/finsecure/config/haproxy/haproxy.cfg
+    mode: '0644'
+    validate: "docker run --rm -v %s:/tmp/haproxy.cfg:ro haproxy:{{ haproxy_version | default('2.8') }} haproxy -c -f /tmp/haproxy.cfg"
+  notify: Reload haproxy
+
+- name: Deploy HAProxy container
+  community.docker.docker_container:
+    name: "haproxy-{{ datacenter }}"
+    image: "haproxy:{{ haproxy_version | default('2.8') }}"
+    state: started
+    restart_policy: unless-stopped
+    networks:
+      - name: "{{ docker_networks[0].name }}"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "{{ haproxy.stats_port }}:{{ haproxy.stats_port }}"
+    volumes:
+      - /opt/finsecure/config/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+- name: Wait for HAProxy to be ready
+  ansible.builtin.uri:
+    url: "http://localhost:{{ haproxy.stats_port }}/health"
+    method: GET
+    status_code: 200
+  register: haproxy_health
+  until: haproxy_health.status == 200
+  retries: 10
+  delay: 3
+  ignore_errors: true

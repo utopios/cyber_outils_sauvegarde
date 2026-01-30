@@ -1,0 +1,13 @@
+---
+# Handlers pour le rôle loadbalancer
+
+- name: Reload haproxy
+  ansible.builtin.command:
+    cmd: "docker kill -s HUP haproxy-{{ datacenter }}"
+  ignore_errors: true
+
+- name: Restart haproxy
+  community.docker.docker_container:
+    name: "haproxy-{{ datacenter }}"
+    state: started
+    restart: true

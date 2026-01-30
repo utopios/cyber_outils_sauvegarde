@@ -1,0 +1,314 @@
+---
+# Playbook de Failover Complet (Full Failover)
+# Orchestre le failover de l'ensemble de l'infrastructure: DB + App + LB
+#
+# ATTENTION: Playbook critique - Exécuté en situation de crise
+#
+# RTO Global: 15 minutes
+#
+# Usage:
+#   ansible-playbook playbooks/failover/full_failover.yml
+#   ansible-playbook playbooks/failover/full_failover.yml --check  # Dry-run
+#   ansible-playbook playbooks/failover/full_failover.yml -e confirm_failover=true
+
+- name: "Initialisation - Full Failover PCA/PRA"
+  hosts: localhost
+  gather_facts: true
+
+  vars:
+    failover_id: "FULL-FO-{{ ansible_date_time.epoch }}"
+    confirm_failover: false
+    source_dc: "paris"
+    target_dc: "lyon"
+
+  tasks:
+    - name: Display critical warning
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════════════╗
+          ║                                                                          ║
+          ║     ⚠️⚠️⚠️   FAILOVER COMPLET - OPÉRATION CRITIQUE   ⚠️⚠️⚠️                ║
+          ║                                                                          ║
+          ╠══════════════════════════════════════════════════════════════════════════╣
+          ║                                                                          ║
+          ║   Cette opération va basculer l'intégralité des services de              ║
+          ║   DC-PARIS vers DC-LYON.                                                 ║
+          ║                                                                          ║
+          ║   Composants impactés:                                                   ║
+          ║     • Base de données PostgreSQL                                         ║
+          ║     • Cache Redis                                                        ║
+          ║     • Serveurs d'application (API Paiement)                              ║
+          ║     • Load Balancer HAProxy                                              ║
+          ║                                                                          ║
+          ║   ID Failover  : {{ failover_id }}
+          ║   Source       : DC-PARIS (192.168.56.10)
+          ║   Destination  : DC-LYON (192.168.56.20)
+          ║   Timestamp    : {{ ansible_date_time.iso8601 }}
+          ║                                                                          ║
+          ╚══════════════════════════════════════════════════════════════════════════╝
+
+    - name: Confirm failover execution
+      ansible.builtin.pause:
+        prompt: |
+
+          CONFIRMATION REQUISE: Tapez 'FAILOVER' pour continuer ou Ctrl+C pour annuler
+      register: confirmation
+      when: not confirm_failover
+
+    - name: Validate confirmation
+      ansible.builtin.fail:
+        msg: "Failover annulé - Confirmation incorrecte"
+      when:
+        - not confirm_failover
+        - confirmation.user_input != 'FAILOVER'
+
+    - name: Set global failover facts
+      ansible.builtin.set_fact:
+        failover_id: "{{ failover_id }}"
+        failover_start_time: "{{ ansible_date_time.epoch }}"
+        source_dc: "{{ source_dc }}"
+        target_dc: "{{ target_dc }}"
+        rollback_possible: true
+        cacheable: true
+
+    - name: Create failover audit entry
+      ansible.builtin.lineinfile:
+        path: /var/log/finsecure/failover_audit.log
+        line: "{{ ansible_date_time.iso8601 }} | FULL_FAILOVER_START | {{ failover_id }} | {{ source_dc | upper }}->{{ target_dc | upper }}"
+        create: true
+        mode: '0644'
+      become: true
+      failed_when: false
+
+    - name: Send failover initiation notification
+      ansible.builtin.uri:
+        url: "{{ notifications.slack.webhook_url }}"
+        method: POST
+        body_format: json
+        body:
+          text: |
+            :rotating_light: *FAILOVER COMPLET INITIÉ*
+            • ID: {{ failover_id }}
+            • Source: DC-PARIS
+            • Destination: DC-LYON
+            • Opérateur: {{ ansible_user_id }}
+      when: notifications.slack.enabled | default(false)
+      failed_when: false
+
+
+- name: "Étape 1/4 - Failover Base de Données"
+  ansible.builtin.import_playbook: database_failover.yml
+  vars:
+    failover_id: "{{ hostvars['localhost']['failover_id'] }}"
+    force_failover: "{{ hostvars['localhost']['confirm_failover'] | default(false) }}"
+
+
+- name: "Vérification intermédiaire - Base de données"
+  hosts: db_standby
+  gather_facts: false
+
+  tasks:
+    - name: Verify database is promoted
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -t -c "SELECT pg_is_in_recovery();"
+      register: db_recovery_check
+      changed_when: false
+
+    - name: Fail if database failover unsuccessful
+      ansible.builtin.fail:
+        msg: |
+          ERREUR CRITIQUE: Le failover base de données a échoué!
+          La base de données est toujours en mode recovery.
+          ROLLBACK AUTOMATIQUE DÉCLENCHÉ
+      when: "'t' in db_recovery_check.stdout"
+
+    - name: Update rollback status
+      ansible.builtin.set_fact:
+        db_failover_success: true
+        cacheable: true
+
+
+- name: "Étape 2/4 - Promotion Redis"
+  hosts: dc_lyon
+  gather_facts: false
+
+  tasks:
+    - name: Promote Redis to master
+      ansible.builtin.command:
+        cmd: "docker exec redis-lyon redis-cli -a R3d1sP@ss! REPLICAOF NO ONE"
+      register: redis_promotion
+
+    - name: Verify Redis is now master
+      ansible.builtin.command:
+        cmd: "docker exec redis-lyon redis-cli -a R3d1sP@ss! INFO replication"
+      register: redis_info
+      changed_when: false
+
+    - name: Display Redis status
+      ansible.builtin.debug:
+        msg: "Redis Lyon: {{ 'MASTER' if 'role:master' in redis_info.stdout else 'REPLICA' }}"
+
+    - name: Fail if Redis promotion failed
+      ansible.builtin.fail:
+        msg: "ERREUR: Redis n'a pas été promu en master"
+      when: "'role:master' not in redis_info.stdout"
+
+
+- name: "Étape 3/4 - Failover Applicatif"
+  ansible.builtin.import_playbook: application_failover.yml
+  vars:
+    failover_id: "{{ hostvars['localhost']['failover_id'] }}"
+    target_dc: "lyon"
+
+
+- name: "Étape 4/4 - Validation complète et finalisation"
+  hosts: dc_lyon
+  gather_facts: true
+
+  tasks:
+    - name: Run comprehensive health checks
+      block:
+        - name: Test database connectivity
+          ansible.builtin.command:
+            cmd: "docker exec postgres-standby pg_isready -U postgres"
+          register: final_db_check
+          changed_when: false
+
+        - name: Test Redis connectivity
+          ansible.builtin.command:
+            cmd: "docker exec redis-lyon redis-cli -a R3d1sP@ss! ping"
+          register: final_redis_check
+          changed_when: false
+
+        - name: Test HAProxy status
+          ansible.builtin.uri:
+            url: "http://localhost:8404/health"
+            method: GET
+            status_code: 200
+          register: final_haproxy_check
+          ignore_errors: true
+
+        - name: Test API endpoint
+          ansible.builtin.uri:
+            url: "http://localhost/health"
+            method: GET
+            status_code: 200
+            timeout: 15
+          register: final_api_check
+          retries: 3
+          delay: 5
+          ignore_errors: true
+
+        - name: Aggregate validation results
+          ansible.builtin.set_fact:
+            validation_results:
+              database: "{{ 'OK' if final_db_check.rc == 0 else 'FAILED' }}"
+              redis: "{{ 'OK' if 'PONG' in final_redis_check.stdout else 'FAILED' }}"
+              haproxy: "{{ 'OK' if final_haproxy_check.status | default(0) == 200 else 'FAILED' }}"
+              api: "{{ 'OK' if final_api_check.status | default(0) == 200 else 'FAILED' }}"
+
+        - name: Display validation results
+          ansible.builtin.debug:
+            msg: |
+              ═══════════════════════════════════════════════════════════════
+                              VALIDATION FINALE DU FAILOVER
+              ═══════════════════════════════════════════════════════════════
+
+              Composant          │ Statut
+              ───────────────────┼────────────
+              PostgreSQL         │ {{ validation_results.database }}
+              Redis              │ {{ validation_results.redis }}
+              HAProxy            │ {{ validation_results.haproxy }}
+              API Application    │ {{ validation_results.api }}
+
+              ═══════════════════════════════════════════════════════════════
+
+      rescue:
+        - name: Trigger rollback on validation failure
+          ansible.builtin.debug:
+            msg: "ERREUR CRITIQUE: Validation échouée - Déclenchement du rollback"
+
+        - name: Execute rollback
+          ansible.builtin.include_tasks: ../failback/emergency_rollback.yml
+          when: hostvars['localhost']['rollback_possible'] | default(false)
+
+
+- name: "Finalisation et Rapport"
+  hosts: localhost
+  gather_facts: true
+
+  tasks:
+    - name: Calculate total failover duration
+      ansible.builtin.set_fact:
+        total_duration: "{{ (ansible_date_time.epoch | int) - (failover_start_time | int) }}"
+        rto_respected: "{{ ((ansible_date_time.epoch | int) - (failover_start_time | int)) < 900 }}"
+
+    - name: Display final report
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════════════╗
+          ║                    FAILOVER COMPLET - RAPPORT FINAL                      ║
+          ╠══════════════════════════════════════════════════════════════════════════╣
+          ║                                                                          ║
+          ║   ID Failover      : {{ failover_id }}
+          ║   Durée totale     : {{ total_duration }} secondes
+          ║   RTO (15 min)     : {{ '✓ RESPECTÉ' if rto_respected else '✗ DÉPASSÉ' }}
+          ║                                                                          ║
+          ║   ─────────────────────────────────────────────────────────────────────  ║
+          ║                                                                          ║
+          ║   CONFIGURATION ACTIVE:                                                  ║
+          ║                                                                          ║
+          ║   • Datacenter actif    : DC-LYON (192.168.56.20)                        ║
+          ║   • PostgreSQL Primary  : postgres-standby (promu)                       ║
+          ║   • Redis Master        : redis-lyon                                     ║
+          ║   • Load Balancer       : haproxy-lyon                                   ║
+          ║   • Applications        : app-lyon-01, app-lyon-02                       ║
+          ║                                                                          ║
+          ║   ─────────────────────────────────────────────────────────────────────  ║
+          ║                                                                          ║
+          ║   PROCHAINES ÉTAPES:                                                     ║
+          ║                                                                          ║
+          ║   1. Vérifier les métriques de performance                               ║
+          ║   2. Informer les équipes métier                                         ║
+          ║   3. Planifier le failback quand DC-PARIS sera restauré                  ║
+          ║   4. Analyser la cause de l'incident                                     ║
+          ║                                                                          ║
+          ╚══════════════════════════════════════════════════════════════════════════╝
+
+    - name: Send completion notification
+      ansible.builtin.uri:
+        url: "{{ notifications.slack.webhook_url }}"
+        method: POST
+        body_format: json
+        body:
+          attachments:
+            - color: "{{ 'good' if rto_respected else 'warning' }}"
+              title: "FAILOVER COMPLET TERMINÉ"
+              fields:
+                - title: "ID"
+                  value: "{{ failover_id }}"
+                  short: true
+                - title: "Durée"
+                  value: "{{ total_duration }}s"
+                  short: true
+                - title: "RTO"
+                  value: "{{ 'Respecté' if rto_respected else 'Dépassé' }}"
+                  short: true
+                - title: "DC Actif"
+                  value: "Lyon"
+                  short: true
+              footer: "FinSecure PCA/PRA"
+              ts: "{{ ansible_date_time.epoch }}"
+      when: notifications.slack.enabled | default(false)
+      failed_when: false
+
+    - name: Update audit log
+      ansible.builtin.lineinfile:
+        path: /var/log/finsecure/failover_audit.log
+        line: "{{ ansible_date_time.iso8601 }} | FULL_FAILOVER_COMPLETE | {{ failover_id }} | DURATION:{{ total_duration }}s | RTO:{{ 'OK' if rto_respected else 'EXCEEDED' }}"
+        create: true
+        mode: '0644'
+      become: true
+      failed_when: false

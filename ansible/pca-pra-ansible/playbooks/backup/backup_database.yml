@@ -1,0 +1,93 @@
+---
+# Playbook de sauvegarde PostgreSQL
+# Conforme aux exigences RPO du BIA FinSecure
+#
+# Usage:
+#   ansible-playbook playbooks/backup/backup_database.yml
+#   ansible-playbook playbooks/backup/backup_database.yml -e backup_type=diff
+#   ansible-playbook playbooks/backup/backup_database.yml -e backup_type=full --limit dc_paris
+
+- name: PostgreSQL Backup - FinSecure PCA/PRA
+  hosts: databases
+  gather_facts: true
+  become: true
+
+  vars:
+    backup_type: "diff"  # Options: full, diff, incr
+    backup_start_time: "{{ ansible_date_time.iso8601 }}"
+
+  pre_tasks:
+    - name: Display backup operation info
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║           SAUVEGARDE POSTGRESQL - FINSECURE PCA/PRA              ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ Type de sauvegarde : {{ backup_type | upper }}
+          ║ Datacenter         : {{ dc_name | default('N/A') }}
+          ║ Serveur            : {{ inventory_hostname }}
+          ║ Rôle PostgreSQL    : {{ pg_role | default('N/A') }}
+          ║ Timestamp          : {{ backup_start_time }}
+          ╚══════════════════════════════════════════════════════════════════╝
+
+    - name: Verify PostgreSQL container is running
+      ansible.builtin.command:
+        cmd: "docker ps --filter name={{ pg_container }} --format '{{ '{{' }}.Status{{ '}}' }}'"
+      register: pg_container_status
+      changed_when: false
+      failed_when: "'Up' not in pg_container_status.stdout"
+
+    - name: Check PostgreSQL connectivity
+      ansible.builtin.command:
+        cmd: "docker exec {{ pg_container }} pg_isready -U postgres"
+      register: pg_ready
+      changed_when: false
+      failed_when: pg_ready.rc != 0
+
+    - name: Get current replication lag (if standby)
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -t -c
+          "SELECT CASE WHEN pg_is_in_recovery() THEN
+            COALESCE(EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))::int, 0)
+          ELSE 0 END;"
+      register: replication_lag
+      changed_when: false
+      when: pg_role == 'standby'
+
+    - name: Warn if replication lag exceeds RPO
+      ansible.builtin.debug:
+        msg: "⚠️  ATTENTION: Lag de réplication de {{ replication_lag.stdout | trim }} secondes"
+      when:
+        - pg_role == 'standby'
+        - replication_lag.stdout | trim | int > pca_requirements.base_transactions.rpo_minutes * 60
+
+  roles:
+    - role: backup
+      vars:
+        backup_type: "{{ backup_type }}"
+
+  post_tasks:
+    - name: Get backup completion status
+      ansible.builtin.command:
+        cmd: "docker exec {{ pg_container }} pgbackrest --stanza={{ pgbackrest_stanza }} info"
+      register: backup_final_status
+      changed_when: false
+
+    - name: Display backup summary
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║                    RÉSUMÉ DE LA SAUVEGARDE                       ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          {{ backup_final_status.stdout }}
+          ╚══════════════════════════════════════════════════════════════════╝
+
+    - name: Record backup in audit log
+      ansible.builtin.lineinfile:
+        path: /var/log/finsecure/backup_audit.log
+        line: "{{ ansible_date_time.iso8601 }} | {{ inventory_hostname }} | {{ backup_type }} | SUCCESS"
+        create: true
+        mode: '0644'
+      failed_when: false

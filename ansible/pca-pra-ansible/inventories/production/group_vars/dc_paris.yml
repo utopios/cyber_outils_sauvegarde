@@ -1,0 +1,111 @@
+---
+# Variables spécifiques au datacenter Paris (Principal)
+
+# ============================================
+# IDENTIFICATION DC
+# ============================================
+dc_name: "DC-PARIS"
+dc_code: "PAR"
+dc_type: primary
+dc_priority: 1
+
+# ============================================
+# RÉSEAU
+# ============================================
+dc_network_config:
+  subnet: "10.1.0.0/16"
+  gateway: "10.1.0.1"
+  dns_servers:
+    - "10.1.0.10"
+    - "10.1.0.11"
+  ntp_servers:
+    - "ntp1.finsecure.local"
+    - "ntp2.finsecure.local"
+
+# Docker networks
+docker_networks:
+  - name: dc_paris_net
+    driver: bridge
+    ipam:
+      subnet: "172.20.0.0/16"
+      gateway: "172.20.0.1"
+
+# ============================================
+# POSTGRESQL - PRIMARY
+# ============================================
+pg_role: primary
+pg_listen_addresses: "*"
+pg_synchronous_standby_names: "lyon_standby"
+
+# Configuration de réplication
+pg_replication_config:
+  slot_name: "lyon_replica"
+  application_name: "paris_primary"
+  standby_host: "192.168.56.20"
+  standby_port: 5432
+
+# ============================================
+# REDIS - MASTER
+# ============================================
+redis_role: master
+redis_bind: "0.0.0.0"
+
+redis_replication_config:
+  replica_hosts:
+    - host: "192.168.56.20"
+      port: 6379
+
+# ============================================
+# HAPROXY - ACTIVE
+# ============================================
+haproxy_role: primary
+haproxy_state: active
+
+haproxy_backends:
+  api:
+    balance: roundrobin
+    servers:
+      - name: app-paris-01
+        address: "app-paris-01:8080"
+        weight: 100
+      - name: app-paris-02
+        address: "app-paris-02:8080"
+        weight: 100
+
+# ============================================
+# APPLICATIONS
+# ============================================
+app_instances:
+  - name: app-paris-01
+    container_port: 8080
+    host_port: 8081
+    env:
+      SPRING_PROFILES_ACTIVE: "production,paris"
+      DB_HOST: "postgres-primary"
+      REDIS_HOST: "redis-paris"
+  - name: app-paris-02
+    container_port: 8080
+    host_port: 8082
+    env:
+      SPRING_PROFILES_ACTIVE: "production,paris"
+      DB_HOST: "postgres-primary"
+      REDIS_HOST: "redis-paris"
+
+# ============================================
+# BACKUP CONFIGURATION
+# ============================================
+backup_config:
+  is_primary: true
+  local_retention_days: 7
+  ship_to_standby: true
+  standby_host: "192.168.56.20"
+
+# pgBackRest specifique Paris
+pgbackrest_repo:
+  repo1_path: /var/lib/pgbackrest
+  repo1_retention_full: 2
+  repo1_retention_diff: 7
+  # Repo distant sur Lyon pour DR
+  repo2_host: "192.168.56.20"
+  repo2_host_user: postgres
+  repo2_path: /var/lib/pgbackrest

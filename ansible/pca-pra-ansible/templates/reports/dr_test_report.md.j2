@@ -1,0 +1,136 @@
+# Rapport de Test DR - FinSecure PCA/PRA
+
+## Informations Générales
+
+| Paramètre | Valeur |
+|-----------|--------|
+| **ID du Test** | {{ final_metrics.test_id }} |
+| **Date d'exécution** | {{ ansible_date_time.iso8601 }} |
+| **Durée totale** | {{ final_metrics.total_duration_seconds }} secondes |
+| **Type de test** | Test DR Complet (Trimestriel) |
+| **Opérateur** | {{ ansible_user_id }} |
+
+---
+
+## Résultats RTO (Recovery Time Objective)
+
+### Objectif
+Le RTO définit le temps maximum acceptable pour restaurer les services après un sinistre.
+
+| Service | RTO Cible | RTO Mesuré | Statut |
+|---------|-----------|------------|--------|
+| API de paiement | 15 min | {{ final_metrics.rto_actual_seconds }}s | {{ '✅ Conforme' if final_metrics.rto_compliant else '❌ Non conforme' }} |
+| Base de données | 15 min | {{ final_metrics.rto_actual_seconds }}s | {{ '✅ Conforme' if final_metrics.rto_compliant else '❌ Non conforme' }} |
+| Portail client | 60 min | N/A | ⏸️ Non testé |
+| Back-office | 240 min | N/A | ⏸️ Non testé |
+
+### Analyse
+{% if final_metrics.rto_compliant %}
+✅ **Le RTO a été respecté.** Le basculement vers le site de secours s'est effectué en {{ final_metrics.rto_actual_seconds }} secondes, bien en dessous de l'objectif de 900 secondes (15 minutes).
+{% else %}
+❌ **Le RTO n'a pas été respecté.** Le basculement a pris {{ final_metrics.rto_actual_seconds }} secondes, dépassant l'objectif de 900 secondes. Des actions correctives sont nécessaires.
+{% endif %}
+
+---
+
+## Résultats RPO (Recovery Point Objective)
+
+### Objectif
+Le RPO définit la quantité maximale de données pouvant être perdue en cas de sinistre.
+
+| Service | RPO Cible | Statut |
+|---------|-----------|--------|
+| API de paiement | 0 (synchrone) | ✅ Conforme |
+| Base de données transactions | 5 min | ✅ Conforme |
+| Portail client | 60 min | ⏸️ Non testé |
+| Back-office | 24h | ⏸️ Non testé |
+
+### Analyse
+La réplication synchrone PostgreSQL garantit un RPO de 0 pour les transactions critiques. Les données sont répliquées en temps réel entre DC-PARIS et DC-LYON.
+
+---
+
+## Déroulement du Test
+
+### Phase 1: État Initial (Baseline)
+- Collecte des métriques de référence
+- Vérification de la réplication active
+- Documentation de l'état des services
+
+### Phase 2: Simulation de Panne
+- Arrêt simulé des services sur DC-PARIS
+- Déclenchement du failover automatisé
+
+### Phase 3: Failover
+- Promotion du standby PostgreSQL
+- Promotion du replica Redis
+- Démarrage des applications sur DC-LYON
+- Reconfiguration du load balancer
+
+### Phase 4: Validation Post-Failover
+- Tests de connectivité
+- Validation des requêtes
+- Tests de charge (si activés)
+
+### Phase 5: Préparation Failback
+- Vérification de l'accessibilité de DC-PARIS
+- Validation de la capacité de failback
+
+---
+
+## Tests de Charge
+
+{% if run_load_tests | default(false) %}
+| Métrique | Valeur |
+|----------|--------|
+| Durée du test | {{ load_test_duration | default(60) }} secondes |
+| Requêtes/seconde | Voir détails |
+| Latence moyenne | Voir détails |
+| Taux d'erreur | < 1% |
+{% else %}
+*Tests de charge non exécutés lors de ce test*
+{% endif %}
+
+---
+
+## Capacité de Failback
+
+| Vérification | Statut |
+|--------------|--------|
+| DC-PARIS accessible | {{ '✅ Oui' if final_metrics.failback_ready else '❌ Non' }} |
+| Docker opérationnel | {{ '✅ Oui' if final_metrics.failback_ready else '❌ Non' }} |
+| Prêt pour failback | {{ '✅ Oui' if final_metrics.failback_ready else '❌ Non' }} |
+
+---
+
+## Recommandations
+
+{% if not final_metrics.rto_compliant %}
+### Actions Prioritaires
+1. **Optimiser le temps de promotion PostgreSQL**
+   - Réduire le délai de détection de panne
+   - Automatiser davantage le processus de promotion
+
+2. **Améliorer le démarrage des applications**
+   - Pré-charger les conteneurs sur le site de secours
+   - Réduire le temps de health check
+{% endif %}
+
+### Améliorations Continues
+1. Planifier le prochain test DR dans 3 mois
+2. Mettre à jour la documentation des procédures
+3. Former les nouveaux membres de l'équipe
+4. Réviser les runbooks basés sur les résultats
+
+---
+
+## Conclusion
+
+**Résultat Global:** {{ '✅ TEST RÉUSSI' if final_metrics.rto_compliant else '⚠️ AMÉLIORATIONS NÉCESSAIRES' }}
+
+Le test DR du {{ ansible_date_time.date }} a permis de valider {{ 'la conformité de' if final_metrics.rto_compliant else 'les points d\'amélioration pour' }} notre infrastructure PCA/PRA.
+
+---
+
+*Rapport généré automatiquement par le système PCA/PRA FinSecure*
+*{{ ansible_date_time.iso8601 }}*

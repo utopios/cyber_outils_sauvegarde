@@ -1,0 +1,80 @@
+---
+# Playbook principal - Déploiement complet de l'infrastructure PCA/PRA
+#
+# Usage:
+#   ansible-playbook playbooks/site.yml
+#   ansible-playbook playbooks/site.yml --tags "common,database"
+#   ansible-playbook playbooks/site.yml --limit dc_paris
+
+- name: "Phase 1 - Configuration de base"
+  hosts: all
+  become: true
+  gather_facts: true
+  tags: [common]
+
+  roles:
+    - role: common
+
+- name: "Phase 2 - Déploiement des bases de données"
+  hosts: databases
+  become: true
+  gather_facts: true
+  tags: [database]
+
+  roles:
+    - role: database
+
+- name: "Phase 3 - Déploiement des serveurs d'application"
+  hosts: app_servers
+  become: true
+  gather_facts: true
+  tags: [application]
+
+  roles:
+    - role: application
+
+- name: "Phase 4 - Déploiement des load balancers"
+  hosts: loadbalancers
+  become: true
+  gather_facts: true
+  tags: [loadbalancer]
+
+  roles:
+    - role: loadbalancer
+
+- name: "Phase 5 - Configuration du monitoring"
+  hosts: dc_paris
+  become: true
+  gather_facts: true
+  tags: [monitoring]
+
+  roles:
+    - role: monitoring
+      vars:
+        deploy_monitoring_stack: true
+
+- name: "Phase 6 - Configuration des sauvegardes"
+  hosts: db_primary
+  become: true
+  gather_facts: true
+  tags: [backup]
+
+  roles:
+    - role: backup
+
+- name: "Validation finale"
+  hosts: all
+  gather_facts: false
+  tags: [validate]
+
+  tasks:
+    - name: Validate infrastructure
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║            DÉPLOIEMENT PCA/PRA TERMINÉ                           ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ Host          : {{ inventory_hostname }}
+          ║ Datacenter    : {{ dc_name | default('N/A') }}
+          ║ Rôle          : {{ dc_role | default('N/A') }}
+          ╚══════════════════════════════════════════════════════════════════╝

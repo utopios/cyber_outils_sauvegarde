@@ -1,2 +1,7 @@
 ceph-workshop/solutions/**
 haproxy-workshop/solutions/**
+**/.vagrant/*
+.vagrant/*
+.vagrant/**
+*/.vagrant/**/*
+*/.vagrant/*

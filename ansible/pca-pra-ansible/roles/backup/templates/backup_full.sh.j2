@@ -1,0 +1,68 @@
+#!/bin/bash
+# Script de sauvegarde complète PostgreSQL
+# Généré par Ansible pour FinSecure PCA/PRA
+# Datacenter: {{ dc_name | default('N/A') }}
+
+set -euo pipefail
+
+# Configuration
+STANZA="{{ pgbackrest_stanza }}"
+PG_CONTAINER="{{ pg_container }}"
+LOG_FILE="{{ pgbackrest_log_path }}/full_backup_$(date +%Y%m%d_%H%M%S).log"
+SLACK_WEBHOOK="{{ notifications.slack.webhook_url | default('') }}"
+NOTIFICATION_ENABLED="{{ backup_notify_on_failure | string | lower }}"
+
+# Fonctions
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+notify_failure() {
+    if [[ "$NOTIFICATION_ENABLED" == "true" ]] && [[ -n "$SLACK_WEBHOOK" ]]; then
+        curl -s -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\":x: ÉCHEC Sauvegarde FULL sur {{ inventory_hostname }}\nErreur: $1\"}" \
+            "$SLACK_WEBHOOK" || true
+    fi
+}
+
+notify_success() {
+    if [[ "{{ backup_notify_on_success | string | lower }}" == "true" ]] && [[ -n "$SLACK_WEBHOOK" ]]; then
+        curl -s -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\":white_check_mark: Sauvegarde FULL terminée sur {{ inventory_hostname }}\nDurée: $1\"}" \
+            "$SLACK_WEBHOOK" || true
+    fi
+}
+
+# Script principal
+log "=== Début de la sauvegarde FULL ==="
+log "Stanza: $STANZA"
+log "Container: $PG_CONTAINER"
+
+START_TIME=$(date +%s)
+
+# Vérifier que le conteneur est en cours d'exécution
+if ! docker ps --format '{{ '{{' }}.Names{{ '}}' }}' | grep -q "^${PG_CONTAINER}$"; then
+    log "ERREUR: Container $PG_CONTAINER non trouvé ou arrêté"
+    notify_failure "Container $PG_CONTAINER non disponible"
+    exit 1
+fi
+
+# Exécuter la sauvegarde
+log "Exécution de pgBackRest backup --type=full..."
+if docker exec "$PG_CONTAINER" pgbackrest --stanza="$STANZA" --type=full backup 2>&1 | tee -a "$LOG_FILE"; then
+    END_TIME=$(date +%s)
+    DURATION=$((END_TIME - START_TIME))
+    log "=== Sauvegarde FULL terminée avec succès ==="
+    log "Durée: ${DURATION} secondes"
+
+    # Afficher les informations de sauvegarde
+    log "Informations de sauvegarde:"
+    docker exec "$PG_CONTAINER" pgbackrest --stanza="$STANZA" info | tee -a "$LOG_FILE"
+
+    notify_success "${DURATION}s"
+    exit 0
+else
+    log "ERREUR: Échec de la sauvegarde"
+    notify_failure "pgBackRest a retourné une erreur"
+    exit 1
+fi

@@ -1,0 +1,67 @@
+---
+# Tâches de notification pour les sauvegardes
+
+- name: Send Slack notification
+  ansible.builtin.uri:
+    url: "{{ notifications.slack.webhook_url }}"
+    method: POST
+    body_format: json
+    body:
+      channel: "{{ notifications.slack.channel }}"
+      username: "PCA/PRA Bot"
+      icon_emoji: "{{ ':white_check_mark:' if notification_status == 'success' else ':x:' }}"
+      attachments:
+        - color: "{{ 'good' if notification_status == 'success' else 'danger' }}"
+          title: "{{ notification_type | replace('_', ' ') | title }}"
+          fields:
+            - title: "Statut"
+              value: "{{ notification_status | upper }}"
+              short: true
+            - title: "Datacenter"
+              value: "{{ dc_name | default('N/A') }}"
+              short: true
+            - title: "Serveur"
+              value: "{{ inventory_hostname }}"
+              short: true
+            - title: "Timestamp"
+              value: "{{ ansible_date_time.iso8601 }}"
+              short: true
+          footer: "FinSecure PCA/PRA Automation"
+  when:
+    - notifications.slack.enabled | default(false)
+    - backup_notification_channel == 'slack'
+  delegate_to: localhost
+  become: false
+  failed_when: false
+
+- name: Send email notification
+  community.general.mail:
+    host: "{{ notifications.email.smtp_server }}"
+    port: "{{ notifications.email.smtp_port }}"
+    from: "{{ notifications.email.from_address }}"
+    to: "{{ notifications.email.to_addresses | join(',') }}"
+    subject: "[{{ notification_status | upper }}] {{ notification_type | replace('_', ' ') | title }} - {{ inventory_hostname }}"
+    body: |
+      ============================================
+      NOTIFICATION PCA/PRA - FINSECURE
+      ============================================
+
+      Type: {{ notification_type | replace('_', ' ') | title }}
+      Statut: {{ notification_status | upper }}
+      Serveur: {{ inventory_hostname }}
+      Datacenter: {{ dc_name | default('N/A') }}
+      Timestamp: {{ ansible_date_time.iso8601 }}
+
+      {% if notification_details is defined %}
+      Détails:
+      {{ notification_details }}
+      {% endif %}
+
+      ---
+      Ce message a été généré automatiquement par le système PCA/PRA.
+  when:
+    - notifications.email.enabled | default(false)
+    - backup_notification_channel == 'email'
+  delegate_to: localhost
+  become: false
+  failed_when: false

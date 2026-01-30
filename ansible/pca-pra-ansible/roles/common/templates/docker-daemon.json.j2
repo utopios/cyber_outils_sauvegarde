@@ -1,0 +1,16 @@
+{
+  "log-driver": "{{ docker_log_driver | default('json-file') }}",
+  "log-opts": {
+    "max-size": "{{ docker_log_opts['max-size'] | default('100m') }}",
+    "max-file": "{{ docker_log_opts['max-file'] | default('5') }}"
+  },
+  "storage-driver": "overlay2",
+  "live-restore": true,
+  "default-ulimits": {
+    "nofile": {
+      "Name": "nofile",
+      "Hard": 65535,
+      "Soft": 65535
+    }
+  }
+}

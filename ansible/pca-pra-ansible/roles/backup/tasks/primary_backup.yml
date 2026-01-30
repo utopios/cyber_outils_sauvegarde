@@ -1,0 +1,75 @@
+---
+# Tâches de sauvegarde pour le serveur PostgreSQL Primary
+
+- name: Perform full backup
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ pg_container }}
+      pgbackrest --stanza={{ pgbackrest_stanza }}
+      --type=full
+      --log-level-console=info
+      backup
+  register: full_backup_result
+  changed_when: full_backup_result.rc == 0
+  async: "{{ backup_timeout_full }}"
+  poll: 30
+  when: backup_type | default('full') == 'full'
+  notify:
+    - Notify backup success
+    - Ship backup to standby
+
+- name: Perform differential backup
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ pg_container }}
+      pgbackrest --stanza={{ pgbackrest_stanza }}
+      --type=diff
+      --log-level-console=info
+      backup
+  register: diff_backup_result
+  changed_when: diff_backup_result.rc == 0
+  async: "{{ backup_timeout_diff }}"
+  poll: 15
+  when: backup_type | default('full') == 'diff'
+  notify:
+    - Notify backup success
+    - Ship backup to standby
+
+- name: Perform incremental backup
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ pg_container }}
+      pgbackrest --stanza={{ pgbackrest_stanza }}
+      --type=incr
+      --log-level-console=info
+      backup
+  register: incr_backup_result
+  changed_when: incr_backup_result.rc == 0
+  async: "{{ backup_timeout_diff }}"
+  poll: 10
+  when: backup_type | default('full') == 'incr'
+  notify:
+    - Notify backup success
+    - Ship backup to standby
+
+- name: Get backup info
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ pg_container }}
+      pgbackrest --stanza={{ pgbackrest_stanza }} info --output=json
+  register: backup_info
+  changed_when: false
+
+- name: Parse backup information
+  ansible.builtin.set_fact:
+    backup_status: "{{ backup_info.stdout | from_json }}"
+  when: backup_info.rc == 0
+
+- name: Display backup summary
+  ansible.builtin.debug:
+    msg: |
+      === Résumé de la sauvegarde ===
+      Stanza: {{ pgbackrest_stanza }}
+      Type: {{ backup_type | default('full') }}
+      Statut: {{ 'SUCCESS' if backup_info.rc == 0 else 'FAILED' }}
+      Timestamp: {{ ansible_date_time.iso8601 }}

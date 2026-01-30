@@ -1,0 +1,325 @@
+---
+# Playbook de Failback Base de Données
+# Restaure le DC Paris comme site principal après un failover
+#
+# ATTENTION: Ce playbook nécessite une fenêtre de maintenance
+# car il implique un temps d'arrêt pour la resynchronisation
+#
+# Usage:
+#   ansible-playbook playbooks/failback/database_failback.yml
+#   ansible-playbook playbooks/failback/database_failback.yml -e skip_sync=true
+
+- name: "Phase 0 - Préparation du Failback"
+  hosts: localhost
+  gather_facts: true
+
+  vars:
+    failback_id: "FB-{{ ansible_date_time.epoch }}"
+    skip_sync: false
+    maintenance_window: true
+
+  tasks:
+    - name: Display failback information
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║          FAILBACK BASE DE DONNÉES - DC PARIS                     ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ ID Failback    : {{ failback_id }}
+          ║ Source actuel  : DC-LYON (Primary temporaire)
+          ║ Destination    : DC-PARIS (Primary original)
+          ║ Timestamp      : {{ ansible_date_time.iso8601 }}
+          ╚══════════════════════════════════════════════════════════════════╝
+
+    - name: Confirm maintenance window
+      ansible.builtin.pause:
+        prompt: |
+
+          ⚠️  Cette opération nécessite une fenêtre de maintenance.
+          Les applications seront momentanément indisponibles.
+
+          Tapez 'CONFIRMER' pour continuer ou Ctrl+C pour annuler
+      register: confirmation
+
+    - name: Validate confirmation
+      ansible.builtin.fail:
+        msg: "Failback annulé"
+      when: confirmation.user_input != 'CONFIRMER'
+
+    - name: Set failback facts
+      ansible.builtin.set_fact:
+        failback_id: "{{ failback_id }}"
+        failback_start_time: "{{ ansible_date_time.epoch }}"
+        cacheable: true
+
+
+- name: "Phase 1 - Vérification de l'état actuel"
+  hosts: db_standby  # Lyon est actuellement primary
+  gather_facts: true
+
+  tasks:
+    - name: Verify current primary status
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -t -c "SELECT pg_is_in_recovery();"
+      register: lyon_recovery_status
+      changed_when: false
+
+    - name: Confirm Lyon is currently primary
+      ansible.builtin.assert:
+        that:
+          - "'f' in lyon_recovery_status.stdout"
+        fail_msg: "ERREUR: Lyon n'est pas le primary actuel!"
+        success_msg: "Confirmé: Lyon est le primary actuel"
+
+    - name: Get current WAL position
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -t -c "SELECT pg_current_wal_lsn();"
+      register: current_wal_lsn
+      changed_when: false
+
+    - name: Display current state
+      ansible.builtin.debug:
+        msg: |
+          État actuel:
+          - Primary: DC-LYON (postgres-standby)
+          - Position WAL: {{ current_wal_lsn.stdout | trim }}
+
+
+- name: "Phase 2 - Préparation de DC Paris"
+  hosts: db_primary  # Paris va redevenir primary
+  gather_facts: true
+
+  tasks:
+    - name: Check Paris VM connectivity
+      ansible.builtin.ping:
+      register: paris_ping
+
+    - name: Verify Docker is running
+      ansible.builtin.command:
+        cmd: "docker info"
+      register: docker_status
+      changed_when: false
+
+    - name: Check if old PostgreSQL container exists
+      ansible.builtin.command:
+        cmd: "docker ps -a --filter name={{ pg_container }} --format '{{ '{{' }}.Status{{ '}}' }}'"
+      register: old_container_status
+      changed_when: false
+
+    - name: Remove old PostgreSQL container if exists
+      ansible.builtin.command:
+        cmd: "docker rm -f {{ pg_container }}"
+      when: old_container_status.stdout | length > 0
+      ignore_errors: true
+
+    - name: Clean old data directory (for fresh sync)
+      ansible.builtin.file:
+        path: /var/lib/docker/volumes/pg_data_paris/_data
+        state: absent
+      become: true
+      when: not skip_sync | default(false)
+
+
+- name: "Phase 3 - Arrêt des applications et synchronisation"
+  hosts: dc_lyon
+  gather_facts: false
+
+  tasks:
+    - name: Stop applications to ensure data consistency
+      ansible.builtin.command:
+        cmd: "docker stop {{ item }}"
+      loop:
+        - app-lyon-01
+        - app-lyon-02
+      ignore_errors: true
+
+    - name: Create checkpoint on current primary
+      ansible.builtin.command:
+        cmd: >
+          docker exec postgres-standby
+          psql -U postgres -c "CHECKPOINT;"
+      register: checkpoint_result
+
+    - name: Get final WAL position
+      ansible.builtin.command:
+        cmd: >
+          docker exec postgres-standby
+          psql -U postgres -t -c "SELECT pg_current_wal_lsn();"
+      register: final_wal_lsn
+      changed_when: false
+
+
+- name: "Phase 4 - Restauration de Paris comme Standby puis promotion"
+  hosts: db_primary
+  gather_facts: false
+
+  vars:
+    lyon_host: "192.168.56.20"
+
+  tasks:
+    - name: Start new PostgreSQL container as standby
+      ansible.builtin.command:
+        cmd: >
+          docker run -d
+          --name {{ pg_container }}
+          --network dc_paris_net
+          -p 5432:5432
+          -e POSTGRES_PASSWORD=P@ssw0rd2024!
+          -v pg_data_paris:/var/lib/postgresql/data
+          postgres:15
+      register: new_container
+
+    - name: Wait for container to start
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Perform pg_basebackup from Lyon
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }} bash -c
+          'rm -rf /var/lib/postgresql/data/pgdata/* &&
+           PGPASSWORD="R3pl1c@t0r!" pg_basebackup
+           -h {{ lyon_host }}
+           -p 5432
+           -U replicator
+           -D /var/lib/postgresql/data/pgdata
+           -Fp -Xs -P -R'
+      register: basebackup_result
+      async: 1800
+      poll: 30
+
+    - name: Configure Paris as standby
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }} bash -c
+          'touch /var/lib/postgresql/data/pgdata/standby.signal &&
+           echo "primary_conninfo = '\''host={{ lyon_host }} port=5432 user=replicator password=R3pl1c@t0r!'\''" >> /var/lib/postgresql/data/pgdata/postgresql.auto.conf'
+
+    - name: Restart PostgreSQL with standby config
+      ansible.builtin.command:
+        cmd: "docker restart {{ pg_container }}"
+
+    - name: Wait for standby to sync
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -t -c
+          "SELECT pg_last_wal_replay_lsn();"
+      register: replay_lsn
+      until: replay_lsn.stdout | trim != ''
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Verify standby is synchronized
+      ansible.builtin.debug:
+        msg: "Paris synchronisé - LSN: {{ replay_lsn.stdout | trim }}"
+
+
+- name: "Phase 5 - Bascule vers Paris"
+  hosts: db_standby  # Lyon
+  gather_facts: false
+
+  tasks:
+    - name: Stop accepting new connections on Lyon
+      ansible.builtin.command:
+        cmd: >
+          docker exec postgres-standby
+          psql -U postgres -c
+          "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+           WHERE datname != 'postgres' AND pid != pg_backend_pid();"
+      ignore_errors: true
+
+    - name: Final checkpoint
+      ansible.builtin.command:
+        cmd: >
+          docker exec postgres-standby
+          psql -U postgres -c "CHECKPOINT;"
+
+
+- name: "Phase 5b - Promotion de Paris"
+  hosts: db_primary
+  gather_facts: false
+
+  tasks:
+    - name: Promote Paris to primary
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          pg_ctl promote -D /var/lib/postgresql/data/pgdata
+      register: promote_paris
+
+    - name: Wait for promotion to complete
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ pg_container }}
+          psql -U postgres -t -c "SELECT pg_is_in_recovery();"
+      register: paris_promoted
+      until: "'f' in paris_promoted.stdout"
+      retries: 12
+      delay: 5
+
+    - name: Verify Paris is now primary
+      ansible.builtin.assert:
+        that:
+          - "'f' in paris_promoted.stdout"
+        success_msg: "✓ Paris est maintenant le Primary"
+
+
+- name: "Phase 6 - Reconfiguration de Lyon comme Standby"
+  hosts: db_standby
+  gather_facts: false
+
+  vars:
+    paris_host: "192.168.56.10"
+
+  tasks:
+    - name: Reconfigure Lyon as standby
+      ansible.builtin.command:
+        cmd: >
+          docker exec postgres-standby bash -c
+          'echo "primary_conninfo = '\''host={{ paris_host }} port=5432 user=replicator password=R3pl1c@t0r!'\''" > /var/lib/postgresql/data/pgdata/postgresql.auto.conf &&
+           touch /var/lib/postgresql/data/pgdata/standby.signal'
+
+    - name: Restart Lyon as standby
+      ansible.builtin.command:
+        cmd: "docker restart postgres-standby"
+
+    - name: Verify Lyon is now standby
+      ansible.builtin.command:
+        cmd: >
+          docker exec postgres-standby
+          psql -U postgres -t -c "SELECT pg_is_in_recovery();"
+      register: lyon_standby_check
+      retries: 10
+      delay: 5
+      until: "'t' in lyon_standby_check.stdout"
+      changed_when: false
+
+
+- name: "Phase 7 - Validation et Finalisation"
+  hosts: localhost
+  gather_facts: true
+
+  tasks:
+    - name: Calculate failback duration
+      ansible.builtin.set_fact:
+        failback_duration: "{{ (ansible_date_time.epoch | int) - (failback_start_time | int) }}"
+
+    - name: Display failback summary
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║              FAILBACK BASE DE DONNÉES - TERMINÉ                  ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ ID             : {{ hostvars['localhost']['failback_id'] }}
+          ║ Durée          : {{ failback_duration }} secondes
+          ║ Nouveau Primary: DC-PARIS (postgres-primary)
+          ║ Nouveau Standby: DC-LYON (postgres-standby)
+          ╚══════════════════════════════════════════════════════════════════╝
+
+          Les applications peuvent maintenant être redémarrées sur DC-PARIS.

@@ -1,0 +1,184 @@
+---
+# Playbook de Failback Complet
+# Restaure l'ensemble de l'infrastructure sur DC Paris
+#
+# Usage:
+#   ansible-playbook playbooks/failback/full_failback.yml
+
+- name: "Initialisation - Full Failback vers DC Paris"
+  hosts: localhost
+  gather_facts: true
+
+  vars:
+    failback_id: "FULL-FB-{{ ansible_date_time.epoch }}"
+
+  tasks:
+    - name: Display failback plan
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════════════╗
+          ║                   FAILBACK COMPLET VERS DC PARIS                         ║
+          ╠══════════════════════════════════════════════════════════════════════════╣
+          ║                                                                          ║
+          ║   Cette opération va restaurer l'infrastructure sur le site principal:   ║
+          ║                                                                          ║
+          ║   Étapes:                                                                ║
+          ║   1. Synchronisation des données Lyon → Paris                            ║
+          ║   2. Failback de la base de données                                      ║
+          ║   3. Failback Redis                                                      ║
+          ║   4. Redémarrage des applications sur Paris                              ║
+          ║   5. Reconfiguration du load balancer                                    ║
+          ║   6. Tests de validation                                                 ║
+          ║                                                                          ║
+          ║   ID Failback  : {{ failback_id }}
+          ║   Timestamp    : {{ ansible_date_time.iso8601 }}
+          ║                                                                          ║
+          ╚══════════════════════════════════════════════════════════════════════════╝
+
+    - name: Confirm failback
+      ansible.builtin.pause:
+        prompt: |
+          Cette opération nécessite une fenêtre de maintenance.
+          Tapez 'FAILBACK' pour confirmer
+      register: confirm
+
+    - name: Validate
+      ansible.builtin.fail:
+        msg: "Failback annulé"
+      when: confirm.user_input != 'FAILBACK'
+
+    - name: Set facts
+      ansible.builtin.set_fact:
+        failback_id: "{{ failback_id }}"
+        failback_start_time: "{{ ansible_date_time.epoch }}"
+        cacheable: true
+
+
+- name: "Étape 1/5 - Arrêt des applications sur Lyon"
+  hosts: dc_lyon
+  gather_facts: false
+
+  tasks:
+    - name: Drain HAProxy connections
+      ansible.builtin.command:
+        cmd: >
+          docker exec haproxy-lyon sh -c
+          'echo "set server api_servers/app-lyon-01 state drain" | socat stdio /var/run/haproxy.sock;
+           echo "set server api_servers/app-lyon-02 state drain" | socat stdio /var/run/haproxy.sock'
+      ignore_errors: true
+
+    - name: Wait for connections to drain
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: Stop application containers
+      ansible.builtin.command:
+        cmd: "docker stop {{ item }}"
+      loop:
+        - app-lyon-01
+        - app-lyon-02
+      ignore_errors: true
+
+
+- name: "Étape 2/5 - Failback Base de Données"
+  ansible.builtin.import_playbook: database_failback.yml
+
+
+- name: "Étape 3/5 - Failback Redis"
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Reconfigure Paris Redis as master
+      ansible.builtin.command:
+        cmd: "docker exec redis-paris redis-cli -a R3d1sP@ss! REPLICAOF NO ONE"
+      delegate_to: vm-paris
+
+    - name: Reconfigure Lyon Redis as replica
+      ansible.builtin.command:
+        cmd: "docker exec redis-lyon redis-cli -a R3d1sP@ss! REPLICAOF 192.168.56.10 6379"
+      delegate_to: vm-lyon
+
+
+- name: "Étape 4/5 - Démarrage des applications sur Paris"
+  hosts: dc_paris
+  gather_facts: false
+
+  tasks:
+    - name: Start application containers
+      ansible.builtin.command:
+        cmd: "docker start {{ item }}"
+      loop:
+        - app-paris-01
+        - app-paris-02
+
+    - name: Wait for health check
+      ansible.builtin.uri:
+        url: "http://localhost:{{ item }}/health"
+        method: GET
+        status_code: 200
+      loop:
+        - 8081
+        - 8082
+      retries: 10
+      delay: 5
+      ignore_errors: true
+
+    - name: Reload HAProxy Paris
+      ansible.builtin.command:
+        cmd: "docker restart haproxy-paris"
+
+
+- name: "Étape 5/5 - Validation"
+  hosts: dc_paris
+  gather_facts: false
+
+  tasks:
+    - name: Test API
+      ansible.builtin.uri:
+        url: "http://localhost/health"
+        method: GET
+        status_code: 200
+      register: api_test
+      retries: 5
+      delay: 5
+
+    - name: Test Database
+      ansible.builtin.command:
+        cmd: >
+          docker exec postgres-primary
+          psql -U postgres -d finsecure_transactions -c "SELECT 1;"
+      register: db_test
+      changed_when: false
+
+    - name: Display validation
+      ansible.builtin.debug:
+        msg: |
+          Validation:
+          - API: {{ 'OK' if api_test.status == 200 else 'FAILED' }}
+          - Database: {{ 'OK' if db_test.rc == 0 else 'FAILED' }}
+
+
+- name: "Finalisation"
+  hosts: localhost
+  gather_facts: true
+
+  tasks:
+    - name: Calculate duration
+      ansible.builtin.set_fact:
+        duration: "{{ (ansible_date_time.epoch | int) - (failback_start_time | int) }}"
+
+    - name: Final report
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════════════╗
+          ║                    FAILBACK COMPLET - TERMINÉ                            ║
+          ╠══════════════════════════════════════════════════════════════════════════╣
+          ║ ID            : {{ hostvars['localhost']['failback_id'] }}
+          ║ Durée         : {{ duration }} secondes
+          ║ DC Actif      : PARIS
+          ║ Statut        : OPÉRATIONNEL
+          ╚══════════════════════════════════════════════════════════════════════════╝
+
+          L'infrastructure est revenue à sa configuration nominale.
+          DC Lyon est maintenant en mode standby.

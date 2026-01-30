@@ -1,0 +1,23 @@
+---
+# Collections Ansible requises pour le projet PCA/PRA
+
+collections:
+  # Collection communautaire générale
+  - name: community.general
+    version: ">=7.0.0"
+
+  # Collection Docker
+  - name: community.docker
+    version: ">=3.0.0"
+
+  # Collection PostgreSQL
+  - name: community.postgresql
+    version: ">=3.0.0"
+
+  # Collection pour les commandes POSIX
+  - name: ansible.posix
+    version: ">=1.5.0"
+
+  # Collection pour les utilitaires réseau
+  - name: ansible.netcommon
+    version: ">=5.0.0"

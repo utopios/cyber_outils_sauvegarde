@@ -1,0 +1,277 @@
+---
+# Playbook de Failover Applicatif
+# Bascule les serveurs d'application vers le DC de secours
+#
+# RTO cible: 15-60 minutes selon le service
+#
+# Usage:
+#   ansible-playbook playbooks/failover/application_failover.yml
+#   ansible-playbook playbooks/failover/application_failover.yml -e target_dc=lyon
+
+- name: "Phase 0 - Préparation du Failover Applicatif"
+  hosts: localhost
+  gather_facts: true
+
+  vars:
+    failover_id: "APP-FO-{{ ansible_date_time.epoch }}"
+    target_dc: "lyon"
+
+  tasks:
+    - name: Display failover information
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║         FAILOVER APPLICATIF - FINSECURE PCA/PRA                  ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ ID Failover    : {{ failover_id }}
+          ║ DC Cible       : {{ target_dc | upper }}
+          ║ Timestamp      : {{ ansible_date_time.iso8601 }}
+          ╚══════════════════════════════════════════════════════════════════╝
+
+    - name: Set failover context
+      ansible.builtin.set_fact:
+        failover_start_time: "{{ ansible_date_time.epoch }}"
+        failover_id: "{{ failover_id }}"
+        target_dc: "{{ target_dc }}"
+        cacheable: true
+
+
+- name: "Phase 1 - Arrêt gracieux des applications sur DC Paris"
+  hosts: dc_paris
+  gather_facts: false
+  ignore_unreachable: true
+
+  tasks:
+    - name: Check if Paris DC is reachable
+      ansible.builtin.ping:
+      register: paris_reachable
+      ignore_errors: true
+      timeout: 10
+
+    - name: Drain connections from HAProxy
+      ansible.builtin.command:
+        cmd: >
+          docker exec haproxy-paris
+          echo "set server api_servers/app-paris-01 state drain" | socat stdio /var/run/haproxy.sock
+      ignore_errors: true
+      when: paris_reachable is succeeded
+
+    - name: Wait for existing connections to complete
+      ansible.builtin.pause:
+        seconds: 30
+        prompt: "Attente de la fin des connexions actives..."
+      when: paris_reachable is succeeded
+
+    - name: Stop application containers gracefully
+      ansible.builtin.command:
+        cmd: "docker stop --time 30 {{ item }}"
+      loop: "{{ app_containers | default(['app-paris-01', 'app-paris-02']) }}"
+      ignore_errors: true
+      when: paris_reachable is succeeded
+
+    - name: Log Paris shutdown status
+      ansible.builtin.debug:
+        msg: "Applications Paris: {{ 'Arrêtées' if paris_reachable is succeeded else 'Inaccessibles' }}"
+
+
+- name: "Phase 2 - Vérification de l'état du DC Lyon"
+  hosts: dc_lyon
+  gather_facts: true
+
+  tasks:
+    - name: Check Docker daemon status
+      ansible.builtin.command:
+        cmd: "docker info"
+      register: docker_status
+      changed_when: false
+
+    - name: Verify database is promoted and ready
+      ansible.builtin.command:
+        cmd: "docker exec postgres-standby pg_isready -U postgres"
+      register: db_ready
+      changed_when: false
+      retries: 5
+      delay: 5
+      until: db_ready.rc == 0
+
+    - name: Check Redis status
+      ansible.builtin.command:
+        cmd: "docker exec redis-lyon redis-cli -a R3d1sP@ss! ping"
+      register: redis_status
+      changed_when: false
+
+    - name: Display Lyon DC status
+      ansible.builtin.debug:
+        msg: |
+          État du DC Lyon:
+          - Docker: {{ 'OK' if docker_status.rc == 0 else 'ERREUR' }}
+          - PostgreSQL: {{ 'OK' if db_ready.rc == 0 else 'ERREUR' }}
+          - Redis: {{ 'OK' if 'PONG' in redis_status.stdout else 'ERREUR' }}
+
+
+- name: "Phase 3 - Démarrage des applications sur DC Lyon"
+  hosts: dc_lyon
+  gather_facts: false
+
+  tasks:
+    - name: Update application environment for failover mode
+      ansible.builtin.command:
+        cmd: >
+          docker-compose -f /opt/finsecure/docker/docker-compose-lyon.yml
+          --profile failover
+          up -d
+      args:
+        chdir: /opt/finsecure/docker
+      register: compose_up
+
+    - name: Start application containers manually if compose fails
+      ansible.builtin.command:
+        cmd: "docker start {{ item }}"
+      loop:
+        - app-lyon-01
+        - app-lyon-02
+      when: compose_up.rc != 0
+      ignore_errors: true
+
+    - name: Wait for applications to be healthy
+      ansible.builtin.command:
+        cmd: "docker exec {{ item }} wget -q --spider http://localhost:8080/health"
+      loop:
+        - app-lyon-01
+        - app-lyon-02
+      register: health_check
+      retries: 12
+      delay: 5
+      until: health_check.rc == 0
+      ignore_errors: true
+
+    - name: Display application startup status
+      ansible.builtin.debug:
+        msg: |
+          Applications Lyon:
+          {% for result in health_check.results %}
+          - {{ result.item }}: {{ 'Healthy' if result.rc == 0 else 'Unhealthy' }}
+          {% endfor %}
+
+
+- name: "Phase 4 - Reconfiguration du Load Balancer"
+  hosts: dc_lyon
+  gather_facts: false
+
+  tasks:
+    - name: Reload HAProxy configuration
+      ansible.builtin.command:
+        cmd: "docker exec haproxy-lyon haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg"
+      register: haproxy_check
+      changed_when: false
+
+    - name: Restart HAProxy if config is valid
+      ansible.builtin.command:
+        cmd: "docker restart haproxy-lyon"
+      when: haproxy_check.rc == 0
+
+    - name: Wait for HAProxy to be ready
+      ansible.builtin.uri:
+        url: "http://localhost:8404/health"
+        method: GET
+        status_code: 200
+      register: haproxy_health
+      retries: 10
+      delay: 3
+      until: haproxy_health.status == 200
+
+    - name: Verify backend servers are up
+      ansible.builtin.command:
+        cmd: "docker exec haproxy-lyon sh -c 'echo \"show servers state\" | socat stdio /var/run/haproxy.sock'"
+      register: backend_status
+      changed_when: false
+
+    - name: Display HAProxy status
+      ansible.builtin.debug:
+        msg: |
+          HAProxy Lyon:
+          - Configuration: {{ 'Valide' if haproxy_check.rc == 0 else 'Invalide' }}
+          - État: {{ 'Opérationnel' if haproxy_health.status == 200 else 'Erreur' }}
+
+
+- name: "Phase 5 - Tests de validation"
+  hosts: dc_lyon
+  gather_facts: false
+
+  tasks:
+    - name: Test API endpoint
+      ansible.builtin.uri:
+        url: "http://localhost/api/payments"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: api_test
+      retries: 3
+      delay: 5
+      ignore_errors: true
+
+    - name: Test health endpoint
+      ansible.builtin.uri:
+        url: "http://localhost/health"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: health_test
+      ignore_errors: true
+
+    - name: Test database connectivity through app
+      ansible.builtin.command:
+        cmd: >
+          docker exec app-lyon-01 sh -c
+          'wget -qO- http://localhost:8080/actuator/health | grep -q UP'
+      register: app_db_test
+      ignore_errors: true
+
+    - name: Validation summary
+      ansible.builtin.debug:
+        msg: |
+          === Résultats de validation ===
+          - API /payments : {{ 'OK' if api_test.status | default(0) == 200 else 'ÉCHEC' }}
+          - Health check  : {{ 'OK' if health_test.status | default(0) == 200 else 'ÉCHEC' }}
+          - Connectivité DB: {{ 'OK' if app_db_test.rc == 0 else 'ÉCHEC' }}
+
+
+- name: "Phase 6 - Notification et finalisation"
+  hosts: localhost
+  gather_facts: true
+
+  vars:
+    failover_end_time: "{{ ansible_date_time.epoch }}"
+
+  tasks:
+    - name: Calculate total failover duration
+      ansible.builtin.set_fact:
+        total_duration: "{{ (failover_end_time | int) - (hostvars['localhost']['failover_start_time'] | int) }}"
+
+    - name: Display final summary
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║            FAILOVER APPLICATIF - TERMINÉ                         ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ ID             : {{ hostvars['localhost']['failover_id'] }}
+          ║ Durée          : {{ total_duration }} secondes
+          ║ DC Actif       : LYON
+          ║ Applications   : app-lyon-01, app-lyon-02
+          ║ Load Balancer  : haproxy-lyon
+          ╚══════════════════════════════════════════════════════════════════╝
+
+    - name: Send Slack notification
+      ansible.builtin.uri:
+        url: "{{ notifications.slack.webhook_url }}"
+        method: POST
+        body_format: json
+        body:
+          text: |
+            :rocket: *FAILOVER APPLICATIF TERMINÉ*
+            • ID: {{ hostvars['localhost']['failover_id'] }}
+            • Durée: {{ total_duration }}s
+            • DC Actif: Lyon
+            • Status: Opérationnel
+      when: notifications.slack.enabled | default(false)
+      failed_when: false

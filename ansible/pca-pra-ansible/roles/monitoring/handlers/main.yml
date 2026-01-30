@@ -1,0 +1,14 @@
+---
+# Handlers pour le rôle monitoring
+
+- name: Reload prometheus
+  ansible.builtin.uri:
+    url: "http://localhost:{{ monitoring.prometheus_port }}/-/reload"
+    method: POST
+  ignore_errors: true
+
+- name: Reload alertmanager
+  ansible.builtin.uri:
+    url: "http://localhost:{{ monitoring.alertmanager_port }}/-/reload"
+    method: POST
+  ignore_errors: true

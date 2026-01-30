@@ -1,0 +1,158 @@
+---
+# Variables globales pour tous les environnements
+
+# ============================================
+# INFORMATIONS ENTREPRISE
+# ============================================
+company_name: "FinSecure"
+company_domain: "finsecure.local"
+admin_email: "infrastructure@finsecure.com"
+
+# ============================================
+# EXIGENCES PCA/PRA (définis par le BIA)
+# ============================================
+pca_requirements:
+  api_paiement:
+    rto_minutes: 15
+    rpo_minutes: 0
+    replication: synchronous
+    priority: critical
+  base_transactions:
+    rto_minutes: 15
+    rpo_minutes: 5
+    replication: streaming
+    priority: critical
+  portail_client:
+    rto_minutes: 60
+    rpo_minutes: 60
+    priority: high
+  back_office:
+    rto_minutes: 240
+    rpo_minutes: 1440
+    priority: medium
+
+# ============================================
+# CONFIGURATION DOCKER
+# ============================================
+docker_network_driver: bridge
+docker_log_driver: json-file
+docker_log_opts:
+  max-size: "100m"
+  max-file: "5"
+
+# ============================================
+# CONFIGURATION POSTGRESQL
+# ============================================
+postgresql:
+  version: "15"
+  port: 5432
+  max_connections: 200
+  shared_buffers: "256MB"
+  wal_level: replica
+  max_wal_senders: 10
+  wal_keep_size: "1GB"
+  hot_standby: "on"
+  synchronous_commit: "on"
+
+  # Credentials (à remplacer par Vault en production)
+  admin_user: postgres
+  admin_password: "{{ vault_pg_admin_password | default('P@ssw0rd2024!') }}"
+  replication_user: replicator
+  replication_password: "{{ vault_pg_replication_password | default('R3pl1c@t0r!') }}"
+
+  # Bases de données applicatives
+  databases:
+    - name: finsecure_transactions
+      owner: app_user
+    - name: finsecure_backoffice
+      owner: app_user
+
+# ============================================
+# CONFIGURATION REDIS
+# ============================================
+redis:
+  version: "7"
+  port: 6379
+  maxmemory: "512mb"
+  maxmemory_policy: "volatile-lru"
+  password: "{{ vault_redis_password | default('R3d1sP@ss!') }}"
+
+# ============================================
+# CONFIGURATION HAPROXY
+# ============================================
+haproxy:
+  stats_port: 8404
+  stats_user: admin
+  stats_password: "{{ vault_haproxy_stats_password | default('H@pr0xyStats!') }}"
+  frontend_port: 80
+  frontend_ssl_port: 443
+
+# ============================================
+# CONFIGURATION APPLICATION
+# ============================================
+application:
+  port: 8080
+  health_endpoint: "/actuator/health"
+  metrics_endpoint: "/actuator/prometheus"
+  graceful_shutdown_timeout: 30
+
+# ============================================
+# SAUVEGARDE ET RESTAURATION
+# ============================================
+backup:
+  # Répertoires de stockage
+  local_backup_dir: /backup
+  remote_backup_dir: /mnt/backup-nfs
+
+  # Rétention
+  retention_daily: 7
+  retention_weekly: 4
+  retention_monthly: 12
+
+  # pgBackRest
+  pgbackrest:
+    stanza: finsecure
+    repo_path: /var/lib/pgbackrest
+    log_level_console: info
+    log_level_file: detail
+    process_max: 4
+    compress_type: lz4
+    compress_level: 6
+
+# ============================================
+# NOTIFICATIONS
+# ============================================
+notifications:
+  slack:
+    enabled: true
+    webhook_url: "{{ vault_slack_webhook | default('https://hooks.slack.com/services/XXX/YYY/ZZZ') }}"
+    channel: "#infrastructure-alerts"
+  email:
+    enabled: true
+    smtp_server: smtp.finsecure.local
+    smtp_port: 587
+    from_address: "pca-pra@finsecure.com"
+    to_addresses:
+      - "sre-team@finsecure.com"
+      - "security@finsecure.com"
+
+# ============================================
+# MONITORING
+# ============================================
+monitoring:
+  prometheus_port: 9090
+  grafana_port: 3000
+  alertmanager_port: 9093
+
+# ============================================
+# TIMEOUTS ET RETRIES
+# ============================================
+failover:
+  health_check_interval: 5
+  health_check_retries: 3
+  promotion_timeout: 300
+  dns_propagation_wait: 60
+
+failback:
+  data_sync_timeout: 3600
+  verification_tests: true

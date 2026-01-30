@@ -1,0 +1,68 @@
+---
+# Rôle common - Configuration de base pour tous les serveurs
+
+- name: Set timezone
+  community.general.timezone:
+    name: Europe/Paris
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+
+- name: Install common packages
+  ansible.builtin.package:
+    name: "{{ common_packages }}"
+    state: present
+  vars:
+    common_packages:
+      - curl
+      - wget
+      - vim
+      - htop
+      - net-tools
+      - jq
+      - python3-pip
+      - rsync
+      - socat
+
+- name: Install Docker
+  ansible.builtin.include_tasks: docker.yml
+  when: install_docker | default(true)
+
+- name: Configure system limits
+  ansible.builtin.template:
+    src: limits.conf.j2
+    dest: /etc/security/limits.d/99-finsecure.conf
+    mode: '0644'
+
+- name: Configure sysctl for performance
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: true
+  loop:
+    - { name: 'net.core.somaxconn', value: '65535' }
+    - { name: 'net.ipv4.tcp_max_syn_backlog', value: '65535' }
+    - { name: 'vm.overcommit_memory', value: '1' }
+    - { name: 'vm.swappiness', value: '10' }
+
+- name: Create finsecure directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /opt/finsecure
+    - /opt/finsecure/scripts
+    - /opt/finsecure/config
+    - /var/log/finsecure
+    - /var/log/finsecure/dr_tests
+
+- name: Setup log rotation
+  ansible.builtin.template:
+    src: logrotate.j2
+    dest: /etc/logrotate.d/finsecure
+    mode: '0644'

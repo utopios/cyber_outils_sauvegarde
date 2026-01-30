@@ -1,0 +1,187 @@
+---
+# Docker Compose pour DC-LYON (Site de Secours)
+# Déployer sur la VM Lyon: docker-compose -f docker-compose-lyon.yml up -d
+
+version: '3.8'
+
+networks:
+  dc_lyon_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
+          gateway: 172.21.0.1
+
+volumes:
+  pg_data_lyon:
+  pgbackrest_data_lyon:
+  redis_data_lyon:
+  haproxy_config_lyon:
+
+services:
+  # ============================================
+  # POSTGRESQL STANDBY (Réplication streaming)
+  # ============================================
+  postgres-standby:
+    image: postgres:15
+    container_name: postgres-standby
+    hostname: postgres-standby
+    restart: unless-stopped
+    networks:
+      dc_lyon_net:
+        ipv4_address: 172.21.0.10
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: P@ssw0rd2024!
+      PGDATA: /var/lib/postgresql/data/pgdata
+      # Variables pour la réplication
+      POSTGRES_PRIMARY_HOST: 192.168.56.10
+      POSTGRES_PRIMARY_PORT: 5432
+      POSTGRES_REPLICATION_USER: replicator
+      POSTGRES_REPLICATION_PASSWORD: R3pl1c@t0r!
+    volumes:
+      - pg_data_lyon:/var/lib/postgresql/data
+      - pgbackrest_data_lyon:/var/lib/pgbackrest
+      - ./configs/postgres/standby/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./configs/postgres/standby/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./scripts/init-standby.sh:/docker-entrypoint-initdb.d/init-standby.sh:ro
+    command: >
+      postgres
+      -c config_file=/etc/postgresql/postgresql.conf
+      -c hba_file=/etc/postgresql/pg_hba.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # ============================================
+  # REDIS REPLICA
+  # ============================================
+  redis-lyon:
+    image: redis:7-alpine
+    container_name: redis-lyon
+    hostname: redis-lyon
+    restart: unless-stopped
+    networks:
+      dc_lyon_net:
+        ipv4_address: 172.21.0.20
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data_lyon:/data
+      - ./configs/redis/replica.conf:/usr/local/etc/redis/redis.conf:ro
+    command: redis-server /usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "R3d1sP@ss!", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # APPLICATION API - Instance 1 (Standby)
+  # ============================================
+  app-lyon-01:
+    image: nginx:alpine
+    container_name: app-lyon-01
+    hostname: app-lyon-01
+    restart: "no"  # Ne démarre pas automatiquement (standby)
+    networks:
+      dc_lyon_net:
+        ipv4_address: 172.21.0.30
+    ports:
+      - "8081:8080"
+    environment:
+      - DATACENTER=lyon
+      - INSTANCE=01
+      - DB_HOST=postgres-standby
+      - DB_PORT=5432
+      - REDIS_HOST=redis-lyon
+      - REDIS_PORT=6379
+      - STANDBY_MODE=true
+    volumes:
+      - ./configs/app/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./configs/app/html:/usr/share/nginx/html:ro
+    profiles:
+      - failover  # Ne démarre qu'avec --profile failover
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ============================================
+  # APPLICATION API - Instance 2 (Standby)
+  # ============================================
+  app-lyon-02:
+    image: nginx:alpine
+    container_name: app-lyon-02
+    hostname: app-lyon-02
+    restart: "no"
+    networks:
+      dc_lyon_net:
+        ipv4_address: 172.21.0.31
+    ports:
+      - "8082:8080"
+    environment:
+      - DATACENTER=lyon
+      - INSTANCE=02
+      - DB_HOST=postgres-standby
+      - DB_PORT=5432
+      - REDIS_HOST=redis-lyon
+      - REDIS_PORT=6379
+      - STANDBY_MODE=true
+    volumes:
+      - ./configs/app/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./configs/app/html:/usr/share/nginx/html:ro
+    profiles:
+      - failover
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ============================================
+  # HAPROXY LOAD BALANCER (Standby)
+  # ============================================
+  haproxy-lyon:
+    image: haproxy:2.8
+    container_name: haproxy-lyon
+    hostname: haproxy-lyon
+    restart: unless-stopped
+    networks:
+      dc_lyon_net:
+        ipv4_address: 172.21.0.5
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8404:8404"
+    volumes:
+      - ./configs/haproxy/haproxy-lyon.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================
+  # PGBACKREST (pour recevoir les sauvegardes)
+  # ============================================
+  pgbackrest-lyon:
+    image: pgbackrest/pgbackrest:latest
+    container_name: pgbackrest-lyon
+    hostname: pgbackrest-lyon
+    restart: unless-stopped
+    networks:
+      dc_lyon_net:
+        ipv4_address: 172.21.0.50
+    ports:
+      - "8432:8432"  # Port pour réception des archives
+    volumes:
+      - pg_data_lyon:/var/lib/postgresql/data
+      - pgbackrest_data_lyon:/var/lib/pgbackrest
+      - ./configs/pgbackrest/pgbackrest-standby.conf:/etc/pgbackrest/pgbackrest.conf:ro

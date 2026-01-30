@@ -1,0 +1,42 @@
+---
+# Configuration spécifique pour PostgreSQL Primary
+
+- name: Deploy primary PostgreSQL configuration
+  ansible.builtin.template:
+    src: postgresql-primary.conf.j2
+    dest: /opt/finsecure/config/postgres/postgresql.conf
+    mode: '0644'
+  notify: Reload postgresql
+
+- name: Deploy pg_hba.conf for primary
+  ansible.builtin.template:
+    src: pg_hba-primary.conf.j2
+    dest: /opt/finsecure/config/postgres/pg_hba.conf
+    mode: '0644'
+  notify: Reload postgresql
+
+- name: Create replication user
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ pg_container }}
+      psql -U {{ postgresql.admin_user }} -c
+      "DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ postgresql.replication_user }}') THEN
+          CREATE USER {{ postgresql.replication_user }} WITH REPLICATION ENCRYPTED PASSWORD '{{ postgresql.replication_password }}';
+        END IF;
+      END $$;"
+  changed_when: false
+
+- name: Create replication slot for standby
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ pg_container }}
+      psql -U {{ postgresql.admin_user }} -c
+      "SELECT CASE
+        WHEN NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '{{ pg_replication_config.slot_name }}')
+        THEN pg_create_physical_replication_slot('{{ pg_replication_config.slot_name }}')::text
+        ELSE 'slot exists'
+      END;"
+  register: slot_creation
+  changed_when: "'slot exists' not in slot_creation.stdout"

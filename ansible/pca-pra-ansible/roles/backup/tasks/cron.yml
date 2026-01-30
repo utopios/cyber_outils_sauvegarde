@@ -1,0 +1,74 @@
+---
+# Configuration des tâches cron pour les sauvegardes automatiques
+
+- name: Create backup scripts directory
+  ansible.builtin.file:
+    path: /opt/finsecure/scripts
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Deploy full backup script
+  ansible.builtin.template:
+    src: backup_full.sh.j2
+    dest: /opt/finsecure/scripts/backup_full.sh
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Deploy differential backup script
+  ansible.builtin.template:
+    src: backup_diff.sh.j2
+    dest: /opt/finsecure/scripts/backup_diff.sh
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Schedule full backup (weekly)
+  ansible.builtin.cron:
+    name: "pgBackRest Full Backup"
+    job: "/opt/finsecure/scripts/backup_full.sh >> /var/log/pgbackrest/cron_full.log 2>&1"
+    minute: "0"
+    hour: "2"
+    weekday: "0"
+    user: root
+    state: present
+
+- name: Schedule differential backup (daily)
+  ansible.builtin.cron:
+    name: "pgBackRest Differential Backup"
+    job: "/opt/finsecure/scripts/backup_diff.sh >> /var/log/pgbackrest/cron_diff.log 2>&1"
+    minute: "0"
+    hour: "2"
+    weekday: "1-6"
+    user: root
+    state: present
+
+- name: Schedule backup verification (daily)
+  ansible.builtin.cron:
+    name: "pgBackRest Backup Verification"
+    job: "docker exec {{ pg_container }} pgbackrest --stanza={{ pgbackrest_stanza }} verify >> /var/log/pgbackrest/verify.log 2>&1"
+    minute: "30"
+    hour: "6"
+    user: root
+    state: present
+  when: backup_verify_enabled
+
+- name: Schedule backup info report (hourly)
+  ansible.builtin.cron:
+    name: "pgBackRest Backup Status Report"
+    job: "docker exec {{ pg_container }} pgbackrest --stanza={{ pgbackrest_stanza }} info >> /var/log/pgbackrest/status.log 2>&1"
+    minute: "0"
+    hour: "*"
+    user: root
+    state: present
+
+- name: Schedule old backup cleanup
+  ansible.builtin.cron:
+    name: "pgBackRest Backup Cleanup"
+    job: "docker exec {{ pg_container }} pgbackrest --stanza={{ pgbackrest_stanza }} expire >> /var/log/pgbackrest/expire.log 2>&1"
+    minute: "0"
+    hour: "4"
+    user: root
+    state: present

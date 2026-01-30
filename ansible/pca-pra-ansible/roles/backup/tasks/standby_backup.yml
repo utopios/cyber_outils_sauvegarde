@@ -1,0 +1,64 @@
+---
+# Tâches de sauvegarde pour le serveur PostgreSQL Standby
+# Le standby reçoit les sauvegardes du primary
+
+- name: Ensure standby backup repository exists
+  ansible.builtin.file:
+    path: "{{ pgbackrest_repo_path }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: '0750'
+
+- name: Check replication status
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ pg_container }}
+      psql -U postgres -c "SELECT pg_is_in_recovery();"
+  register: recovery_status
+  changed_when: false
+
+- name: Verify WAL receiver is active
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ pg_container }}
+      psql -U postgres -c "SELECT status, received_lsn, latest_end_lsn FROM pg_stat_wal_receiver;"
+  register: wal_receiver_status
+  changed_when: false
+  when: "'t' in recovery_status.stdout"
+
+- name: Display standby replication status
+  ansible.builtin.debug:
+    msg: |
+      === Statut de réplication Standby ===
+      En mode recovery: {{ 't' in recovery_status.stdout }}
+      WAL Receiver: {{ wal_receiver_status.stdout | default('N/A') }}
+
+- name: Check received backups from primary
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ pg_container }}
+      pgbackrest --stanza={{ pgbackrest_stanza }} info --output=json
+  register: standby_backup_info
+  changed_when: false
+  failed_when: false
+
+- name: Verify backup integrity on standby
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ pg_container }}
+      pgbackrest --stanza={{ pgbackrest_stanza }}
+      --log-level-console=info
+      verify
+  register: verify_result
+  changed_when: false
+  failed_when: false
+  when: backup_verify_enabled
+
+- name: Report verification status
+  ansible.builtin.debug:
+    msg: |
+      === Vérification des sauvegardes sur Standby ===
+      Résultat: {{ 'OK' if verify_result.rc == 0 else 'ÉCHEC' }}
+      {{ verify_result.stdout | default('') }}
+  when: backup_verify_enabled
