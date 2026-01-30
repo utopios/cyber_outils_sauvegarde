@@ -3,6 +3,11 @@
 - name: "First Ansible Playbook"
   hosts: all
   become: yes
+  # vars:
+  #   file_mode: '0644'
+  vars_files:
+    - vars_exemple.yml
+
 
   tasks:
     - name: Update apt cache
@@ -13,9 +18,16 @@
       apt:
         name: nginx
         state: present
+    
 
     - name: Start and enable Nginx service
       service:
         name: nginx
         state: started
         enabled: yes  
+    
+    - name: Create a sample HTML file
+      copy:
+        dest: /var/www/html/index.html
+        content: "<h1>Welcome to Ansible Managed Nginx Server</h1>"
+        mode: "{{ file_mode }}"
