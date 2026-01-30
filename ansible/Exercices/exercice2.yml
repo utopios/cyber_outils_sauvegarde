@@ -1,0 +1,31 @@
+---
+
+- name: Installation d'un serveur web avec remplacement dynamique du port
+  hosts: ubuntu
+  become: true
+  vars_files:
+    - vars_exercice2.yaml
+
+  tasks:
+    - name: Installer Apache
+      apt:
+        name: apache2
+        state: present
+        update_cache: yes
+
+    - name: Modifier le port d'écoute dans ports.conf
+      replace:
+        path: /etc/apache2/ports.conf
+        regexp: '^Listen\s+\d+'
+        replace: "Listen {{ apache_port }}"
+
+    - name: Modifier le port du VirtualHost
+      replace:
+        path: /etc/apache2/sites-enabled/000-default.conf
+        regexp: '<VirtualHost \*:.*>'
+        replace: "<VirtualHost *:{{ apache_port }}>"
+
+    - name: Redémarrer Apache
+      service:
+        name: apache2
+        state: restarted
