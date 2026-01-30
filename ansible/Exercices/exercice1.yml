@@ -1,0 +1,39 @@
+---
+
+- name: "Exercice 1 ubuntu"
+  hosts: ubuntu
+  become: true
+  # become_method: sudo
+  # become_flags: 'su -'
+  tasks:
+  - name: update des packages 
+    shell:
+      cmd: apt update 
+  - name: install des packages
+    shell:
+      cmd: apt install apache2 nginx -y
+  - name: start nginx service
+    shell:
+      cmd: service nginx start
+  - name: start apache2 service
+    shell:
+      cmd: service apache2 start
+
+- name: "Exercice 1 centos"
+  hosts: centos
+  become: true
+  become_method: sudo
+  become_flags: 'su -'
+  tasks:
+  - name: update des packages 
+    shell:
+      cmd: yum update 
+  - name: install des packages
+    shell:
+      cmd: yum install apache2 nginx -y
+  - name: start nginx service
+    shell:
+      cmd: systemctl start nginx
+  - name: start apache2 service
+    shell:
+      cmd: systemctl start apache2
